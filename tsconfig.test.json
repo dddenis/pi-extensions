@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun", "vitest"]
+  },
+  "include": ["src/**/*.test.ts", "kit/**/*.test.ts", "test"]
+}
