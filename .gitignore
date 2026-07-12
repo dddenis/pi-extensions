@@ -3,4 +3,5 @@ node_modules/
 .worktrees/
 .dev/
 .devenv/
+.superpowers/
 dist/
