@@ -1,5 +1,9 @@
 # Agent Instructions
 
+## Project Context
+
+These extensions are maintained for personal use. Prefer the best current contract, design, and implementation over backward compatibility. Preserve compatibility only when the user or an applicable specification explicitly requires it.
+
 ## Specification Workflow
 
 Treat `docs/specs/` as the project's living behavioral and architectural contract.

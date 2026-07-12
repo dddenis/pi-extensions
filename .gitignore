@@ -1,5 +1,6 @@
 node_modules/
 .pi-subagents/
+.worktrees/
 .dev/
 .devenv/
 dist/

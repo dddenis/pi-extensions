@@ -16,14 +16,16 @@ When `<agent-dir>/extensions` has an immutable or declaratively managed parent, 
 
 ## Current Extensions
 
-`src/smoke/index.ts` registers `/pi-extensions-smoke` and is declared explicitly in `pi.extensions` so developers can verify that Pi loaded the package.
+- [Attention hooks](./attention-hooks.md) provides audio notifications for settled runs and subagent attention.
+- [Custom footer](./custom-footer.md) provides the interactive TUI footer and OpenAI limit status.
+- [History picker](./history-picker.md) provides interactive search across current and saved user messages.
 
 ## Runtime Dependencies
 
 Developers install dependencies at the repository root with `bun install`. Pi resolves extension imports through the package-root symlink into the root `node_modules` tree.
 
-Third-party packages imported by extension runtime code belong in `dependencies`. Pi-hosted extension APIs belong in `peerDependencies` with a `*` range and may also appear at a concrete version in `devDependencies` for local typechecking and tools. Packages used only by repository tooling remain development dependencies.
+Third-party packages imported by extension runtime code belong in `dependencies`. Pi-hosted extension APIs belong in `peerDependencies` with a `*` range and may also appear at a concrete version in `devDependencies` for local typechecking and tools. Direct imports from the Pi-hosted TUI follow this peer-plus-concrete-development-dependency rule. Packages used only by repository tooling remain development dependencies.
 
 ## Validation
 
-Extension changes pass `bun run check`. Global loading is validated by linking the package, confirming the symlink target, reloading Pi, and invoking `/pi-extensions-smoke`.
+Extension changes pass `bun run check`, including the [attention-hooks](./attention-hooks.md), [custom-footer](./custom-footer.md), and [history-picker](./history-picker.md) feature contracts. Global linking and unlinking are validated in an isolated agent directory. Global loading is validated by linking the package, confirming the symlink target, reloading Pi, and confirming that the configured extension entrypoints load successfully.
