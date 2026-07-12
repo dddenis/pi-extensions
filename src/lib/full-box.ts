@@ -5,7 +5,9 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 
-export const FULL_BOX_MINIMUM_FRAME_WIDTH = 3;
+const FULL_BOX_HORIZONTAL_PADDING = 1;
+
+export const FULL_BOX_MINIMUM_FRAME_WIDTH = 5;
 
 const normalizeWidth = (width: number): number =>
   Number.isFinite(width) && width > 0 ? Math.floor(width) : 0;
@@ -63,20 +65,21 @@ export class FullBox<T extends Component> implements Component, Focusable {
         .map((line) => truncateToWidth(line, safeWidth, ""));
     }
 
-    const innerWidth = safeWidth - 2;
-    const horizontal = "─".repeat(innerWidth);
-    const content = this.child.render(innerWidth).map((line) => {
-      const truncated = truncateToWidth(line, innerWidth, "");
-      const padding = " ".repeat(
-        Math.max(0, innerWidth - visibleWidth(truncated)),
+    const contentWidth = safeWidth - 2 - FULL_BOX_HORIZONTAL_PADDING * 2;
+    const horizontal = "─".repeat(safeWidth - 2);
+    const sidePadding = " ".repeat(FULL_BOX_HORIZONTAL_PADDING);
+    const content = this.child.render(contentWidth).map((line) => {
+      const truncated = truncateToWidth(line, contentWidth, "");
+      const linePadding = " ".repeat(
+        Math.max(0, contentWidth - visibleWidth(truncated)),
       );
-      return `${this.color("│")}${truncated}${padding}${this.color("│")}`;
+      return `${this.color("│")}${sidePadding}${truncated}${linePadding}${sidePadding}${this.color("│")}`;
     });
 
     return [
-      this.color(`┌${horizontal}┐`),
+      this.color(`╭${horizontal}╮`),
       ...content,
-      this.color(`└${horizontal}┘`),
+      this.color(`╰${horizontal}╯`),
     ];
   }
 

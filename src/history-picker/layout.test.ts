@@ -133,14 +133,15 @@ describe("history picker responsive layout", () => {
     },
   );
 
-  it("uses the full overlay row budget when width suppresses the frame", () => {
-    expect(historyPickerBorderEnabled(24, 2)).toBe(false);
+  it("uses the full overlay row budget below the padded frame width", () => {
+    expect(historyPickerBorderEnabled(24, 4)).toBe(false);
+    expect(historyPickerBorderEnabled(24, 5)).toBe(true);
     const layout = layoutFor({
       terminalRows: 24,
       hasResults: true,
       loading: true,
       warning: true,
-      renderWidth: 2,
+      renderWidth: 4,
     });
 
     expect(layout).toMatchObject({

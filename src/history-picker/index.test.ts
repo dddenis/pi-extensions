@@ -407,19 +407,19 @@ describe("history picker extension", () => {
     });
 
     await harness.invoke();
-    expect(tallLines[0]).toBe(`┌${"─".repeat(78)}┐`);
-    expect(tallLines.at(-1)).toBe(`└${"─".repeat(78)}┘`);
-    expect(tallLines.join("\n")).toContain("History");
+    expect(tallLines[0]).toBe(`╭${"─".repeat(78)}╮`);
+    expect(tallLines.at(-1)).toBe(`╰${"─".repeat(78)}╯`);
+    expect(tallLines.some((line) => line.includes("│ History"))).toBe(true);
     expect(shortLines).toHaveLength(2);
     expect(shortLines.some((line) => line.startsWith("Search: "))).toBe(true);
     expect(shortLines.some((line) => line.startsWith("> "))).toBe(true);
     expect(shortLines.join("\n")).not.toContain("History");
     expect(shortLines.join("\n")).not.toContain("Scope:");
-    expect(restoredLines[0]).toBe(`┌${"─".repeat(78)}┐`);
-    expect(restoredLines.at(-1)).toBe(`└${"─".repeat(78)}┘`);
+    expect(restoredLines[0]).toBe(`╭${"─".repeat(78)}╮`);
+    expect(restoredLines.at(-1)).toBe(`╰${"─".repeat(78)}╯`);
   });
 
-  it("uses the full row budget at narrow width when the border cannot fit", async () => {
+  it("uses the full row budget below the padded frame width", async () => {
     const terminal = { rows: 23 };
     const results = Array.from({ length: 20 }, (_, index) =>
       historyResult(index),
@@ -443,18 +443,20 @@ describe("history picker extension", () => {
           { matches: () => false },
           () => undefined,
         );
-        narrowLines = component.render(2);
+        narrowLines = component.render(4);
         return undefined;
       },
     });
 
     await harness.invoke();
     expect(narrowLines).toHaveLength(historyPickerOverlayRows(terminal.rows));
-    expect(narrowLines[0]).not.toContain("┌");
-    expect(narrowLines.at(-1)).not.toContain("┘");
-    expect(narrowLines.every((line) => visibleWidth(line) <= 2)).toBe(true);
+    expect(narrowLines[0]).not.toContain("╭");
+    expect(narrowLines.at(-1)).not.toContain("╯");
+    expect(narrowLines.every((line) => visibleWidth(line) <= 4)).toBe(true);
     expect(
-      narrowLines.filter((line) => line === "> " || line === "  "),
+      narrowLines.filter(
+        (line) => line.startsWith("> ") || line.startsWith("  "),
+      ),
     ).toHaveLength(12);
   });
 

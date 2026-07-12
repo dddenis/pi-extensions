@@ -4,7 +4,7 @@
 
 The history picker exposes `Ctrl+R` with the description **Search previous user messages**. In interactive TUI mode it opens an overlay, prefills search from the current editor, and replaces the editor with the exact selected message. Cancellation leaves the editor unchanged.
 
-The overlay uses a 100-column target width, a 50-column minimum, an 80% maximum height, and a two-cell margin. The overlay uses a complete accent-colored box border whenever its effective row budget is at least four rows and its normalized render width is at least three columns. The frame consumes two rows and two columns; below either threshold it falls back to borderless rendering so search and one result or the no-results placeholder remain usable.
+The overlay uses a 100-column target width, a 50-column minimum, an 80% maximum height, and a two-cell margin. The overlay uses a complete accent-colored box border with rounded corners and one blank column of horizontal padding whenever its effective row budget is at least four rows and its normalized render width is at least five columns. The frame consumes two rows and four horizontal columns, including both padding columns; below either threshold it falls back to borderless rendering so search and one result or the no-results placeholder remain usable.
 
 The picker reads current terminal height on every render and keeps its output within the overlay's effective percentage-and-margin row budget. Terminal resize changes the visible result capacity without reopening the overlay or resetting query, scope, selection, or saved-snapshot state; Pi's matching maximum height remains a defensive bound.
 
