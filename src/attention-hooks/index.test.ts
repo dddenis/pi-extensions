@@ -4,7 +4,10 @@ import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 import { makeEffectRunner } from "../lib/effect-runtime";
 import { EnvironmentService } from "../services/environment";
-import { FileSystemService } from "../services/file-system";
+import {
+  FileSystemService,
+  type FileSystemService as FileSystemServiceShape,
+} from "../services/file-system";
 import { HomeDirectoryService } from "../services/home-directory";
 import {
   ProcessService,
@@ -14,6 +17,20 @@ import {
   type AttentionHooksRegistrationPort,
   registerAttentionHooks,
 } from "./index";
+
+const makeFileSystemStub = (pathExists: boolean): FileSystemServiceShape => ({
+  exists: () => Effect.succeed(pathExists),
+  statMtimeMs: () => Effect.succeed(0),
+  stat: () => Effect.die(new Error("unexpected stat")),
+  readDirectory: () => Effect.die(new Error("unexpected readDirectory")),
+  readTextFile: () => Effect.succeed(""),
+  makeDirectory: () => Effect.die(new Error("unexpected makeDirectory")),
+  writeTextFile: () => Effect.die(new Error("unexpected writeTextFile")),
+  appendTextFile: () => Effect.die(new Error("unexpected appendTextFile")),
+  realPath: () => Effect.die(new Error("unexpected realPath")),
+  rename: () => Effect.die(new Error("unexpected rename")),
+  remove: () => Effect.die(new Error("unexpected remove")),
+});
 
 const assistant = (
   stopReason: AssistantMessage["stopReason"],
@@ -151,11 +168,7 @@ const makeHarness = async () => {
       snapshot: Effect.sync(() => ({ ...environment })),
     }),
     Layer.succeed(HomeDirectoryService, { get: Effect.succeed("/home/me") }),
-    Layer.succeed(FileSystemService, {
-      exists: () => Effect.succeed(true),
-      statMtimeMs: () => Effect.succeed(0),
-      readTextFile: () => Effect.succeed(""),
-    }),
+    Layer.succeed(FileSystemService, makeFileSystemStub(true)),
     Layer.succeed(ProcessService, {
       spawnScoped: () => Effect.die(new Error("unexpected scoped spawn")),
       spawnDetached: () =>
@@ -330,11 +343,7 @@ describe("registerAttentionHooks", () => {
         Layer.succeed(HomeDirectoryService, {
           get: Effect.succeed("/home/me"),
         }),
-        Layer.succeed(FileSystemService, {
-          exists: () => Effect.succeed(false),
-          statMtimeMs: () => Effect.succeed(0),
-          readTextFile: () => Effect.succeed(""),
-        }),
+        Layer.succeed(FileSystemService, makeFileSystemStub(false)),
         processLayer,
       ),
     );
@@ -392,11 +401,7 @@ describe("registerAttentionHooks", () => {
         Layer.succeed(HomeDirectoryService, {
           get: Effect.succeed("/home/me"),
         }),
-        Layer.succeed(FileSystemService, {
-          exists: () => Effect.succeed(true),
-          statMtimeMs: () => Effect.succeed(0),
-          readTextFile: () => Effect.succeed(""),
-        }),
+        Layer.succeed(FileSystemService, makeFileSystemStub(true)),
         processLayer,
       ),
     );

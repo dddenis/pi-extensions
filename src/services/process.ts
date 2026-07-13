@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import {
   Cause,
@@ -24,6 +23,7 @@ export interface SpawnProcessOptions {
   readonly env?: Readonly<Record<string, string>>;
   readonly detached?: boolean;
   readonly stdio: "ignore" | "pipe";
+  readonly stdoutLineLimitBytes?: number;
 }
 
 export interface SpawnDetachedProcessOptions {
@@ -39,12 +39,18 @@ export interface ProcessExit {
 export class ProcessError extends Data.TaggedError("ProcessError")<{
   readonly operation: "spawn" | "stdin" | "stream" | "wait" | "kill" | "unref";
   readonly message: string;
+  readonly reason?: "record-too-large";
+  readonly stream?: "stdout" | "stderr";
+  readonly limitBytes?: number;
+  readonly observedBytes?: number;
 }> {}
 
 export interface SpawnedProcess {
   readonly writeStdin: (value: string) => Effect.Effect<void, ProcessError>;
   readonly endStdin: Effect.Effect<void, ProcessError>;
+  /** Payload is not replayed; terminal EOF or failure is replayable. */
   readonly stdoutLines: Stream.Stream<string, ProcessError>;
+  /** Payload is not replayed; terminal EOF or failure is replayable. */
   readonly stderrChunks: Stream.Stream<string, ProcessError>;
   /** Replayable: every evaluation observes the same terminal exit/error result. */
   readonly waitForExit: Effect.Effect<ProcessExit, ProcessError>;
@@ -93,6 +99,10 @@ type ProcessShutdownElection =
     };
 
 export interface ManagedProcess extends SpawnedProcess {
+  /** Replayable acknowledgement that the child launched successfully. */
+  readonly awaitLaunch: Effect.Effect<void, ProcessError>;
+  /** Idempotently releases this process handle's local stdout/stderr ownership. */
+  readonly closeOutput: Effect.Effect<void>;
   /** Initiates EOF without waiting for buffered writes to finish. */
   readonly requestStdinEnd: Effect.Effect<void, ProcessError>;
   /** Replayable completion of the EOF request. */
@@ -133,13 +143,73 @@ const processError = (
 ): ProcessError => new ProcessError({ operation, message: messageFrom(cause) });
 
 const streamBufferSize = 16;
+const defaultStdoutLineLimitBytes = 8 * 1024 * 1024;
+const lineFeed = 0x0a;
+const carriageReturn = 0x0d;
+
+type OutputTerminal =
+  | { readonly _tag: "Ended" }
+  | { readonly _tag: "Failed"; readonly error: ProcessError }
+  | { readonly _tag: "Abandoned" };
+
+interface OutputLifecycle {
+  readonly record: (terminal: OutputTerminal) => OutputTerminal;
+  readonly complete: (terminal: OutputTerminal) => void;
+  readonly subscribe: (
+    subscriber: (terminal: OutputTerminal) => void,
+  ) => () => void;
+}
+
+const makeOutputLifecycle = (readable: Readable): OutputLifecycle => {
+  let terminal: OutputTerminal | undefined;
+  const subscribers = new Set<(terminal: OutputTerminal) => void>();
+  const record = (candidate: OutputTerminal): OutputTerminal => {
+    terminal ??= candidate;
+    return terminal;
+  };
+  const complete = (candidate: OutputTerminal): void => {
+    const completed = record(candidate);
+    for (const subscriber of subscribers) subscriber(completed);
+    subscribers.clear();
+  };
+
+  readable.once("end", () => record({ _tag: "Ended" }));
+  readable.once("error", (cause: unknown) =>
+    record({ _tag: "Failed", error: processError("stream", cause) }),
+  );
+  readable.once("close", () => record({ _tag: "Ended" }));
+
+  return {
+    record,
+    complete,
+    subscribe: (subscriber) => {
+      if (terminal !== undefined) {
+        subscriber(terminal);
+        return () => undefined;
+      }
+      subscribers.add(subscriber);
+      return () => subscribers.delete(subscriber);
+    },
+  };
+};
 
 const readableChunks = (
   readable: Readable,
+  lifecycle: OutputLifecycle,
 ): Stream.Stream<string, ProcessError> =>
   Stream.async<string, ProcessError>((emit) => {
     let active = true;
+    const onTerminal = (terminal: OutputTerminal): void => {
+      if (!active) return;
+      active = false;
+      void emit(
+        terminal._tag === "Failed"
+          ? Effect.fail(Option.some(terminal.error))
+          : Effect.fail(Option.none()),
+      );
+    };
     const onData = (chunk: Buffer | string): void => {
+      if (!active) return;
       readable.pause();
       void emit(Effect.succeed(Chunk.of(chunk.toString()))).then(
         () => {
@@ -148,54 +218,192 @@ const readableChunks = (
         () => undefined,
       );
     };
-    const onEnd = (): void => {
-      active = false;
-      void emit(Effect.fail(Option.none()));
-    };
-    const onError = (cause: unknown): void => {
-      active = false;
-      void emit(Effect.fail(Option.some(processError("stream", cause))));
-    };
+    const onEnd = (): void => lifecycle.complete({ _tag: "Ended" });
+    const onError = (cause: unknown): void =>
+      lifecycle.complete({
+        _tag: "Failed",
+        error: processError("stream", cause),
+      });
+    const onClose = (): void => lifecycle.complete({ _tag: "Ended" });
 
     readable.on("data", onData);
     readable.once("end", onEnd);
+    readable.once("close", onClose);
     readable.once("error", onError);
+    const unsubscribe = lifecycle.subscribe(onTerminal);
 
     return Effect.sync(() => {
       active = false;
+      unsubscribe();
       readable.pause();
       readable.off("data", onData);
       readable.off("end", onEnd);
+      readable.off("close", onClose);
       readable.off("error", onError);
     });
   }, streamBufferSize);
 
 const readableLines = (
   readable: Readable,
+  lifecycle: OutputLifecycle,
+  lineLimitBytes: number,
 ): Stream.Stream<string, ProcessError> =>
   Stream.async<string, ProcessError>((emit) => {
-    const lines = createInterface({ input: readable, crlfDelay: Infinity });
-    const onLine = (line: string): void => {
-      emit(Effect.succeed(Chunk.of(line)));
-    };
-    const onClose = (): void => {
-      emit(Effect.fail(Option.none()));
-    };
-    const onError = (cause: unknown): void => {
-      emit(Effect.fail(Option.some(processError("stream", cause))));
-    };
+    let active = true;
+    let finishing = false;
+    let pending = Buffer.alloc(0);
+    let pendingBytes = 0;
 
-    lines.on("line", onLine);
-    lines.once("close", onClose);
+    const clearPending = (): void => {
+      pending = Buffer.alloc(0);
+      pendingBytes = 0;
+    };
+    const ensurePendingCapacity = (required: number): void => {
+      if (pending.length >= required) return;
+      let capacity =
+        pending.length === 0 ? Math.min(lineLimitBytes, 4_096) : pending.length;
+      while (capacity < required) {
+        capacity = Math.min(lineLimitBytes, capacity * 2);
+      }
+      const expanded = Buffer.allocUnsafe(capacity);
+      pending.copy(expanded, 0, 0, pendingBytes);
+      pending = expanded;
+    };
+    const appendPending = (bytes: Buffer): void => {
+      if (bytes.length === 0) return;
+      ensurePendingCapacity(pendingBytes + bytes.length);
+      bytes.copy(pending, pendingBytes);
+      pendingBytes += bytes.length;
+    };
+    const decodeLine = (suffix: Buffer): string => {
+      if (pendingBytes === 0) {
+        const end =
+          suffix.length > 0 && suffix[suffix.length - 1] === carriageReturn
+            ? suffix.length - 1
+            : suffix.length;
+        return suffix.subarray(0, end).toString("utf8");
+      }
+      appendPending(suffix);
+      const end =
+        pendingBytes > 0 && pending[pendingBytes - 1] === carriageReturn
+          ? pendingBytes - 1
+          : pendingBytes;
+      const line = pending.subarray(0, end).toString("utf8");
+      pendingBytes = 0;
+      return line;
+    };
+    const onTerminal = (terminal: OutputTerminal): void => {
+      if (!active) return;
+      active = false;
+      clearPending();
+      void emit(
+        terminal._tag === "Failed"
+          ? Effect.fail(Option.some(terminal.error))
+          : Effect.fail(Option.none()),
+      );
+    };
+    const complete = (terminal: OutputTerminal, flush: boolean): void => {
+      if (!active || finishing) return;
+      finishing = true;
+      if (flush && pendingBytes > 0) {
+        const finalLine = decodeLine(Buffer.alloc(0));
+        void emit(Effect.succeed(Chunk.of(finalLine))).then(
+          () => lifecycle.complete(terminal),
+          () => lifecycle.complete(terminal),
+        );
+      } else {
+        lifecycle.complete(terminal);
+      }
+    };
+    const failOversizedRecord = (
+      observedBytes: number,
+      completedLines: ReadonlyArray<string>,
+    ): void => {
+      finishing = true;
+      const terminal = lifecycle.record({
+        _tag: "Failed",
+        error: new ProcessError({
+          operation: "stream",
+          message: `stdout record exceeded ${String(lineLimitBytes)} bytes`,
+          reason: "record-too-large",
+          stream: "stdout",
+          limitBytes: lineLimitBytes,
+          observedBytes,
+        }),
+      });
+      const fail = (): void => {
+        lifecycle.complete(terminal);
+        readable.destroy();
+      };
+      if (completedLines.length === 0) {
+        fail();
+        return;
+      }
+      void emit(Effect.succeed(Chunk.fromIterable(completedLines))).then(
+        fail,
+        fail,
+      );
+    };
+    const onData = (chunk: Buffer | string): void => {
+      if (!active) return;
+      readable.pause();
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      const lines: Array<string> = [];
+      let from = 0;
+      let newline = bytes.indexOf(lineFeed, from);
+      while (newline !== -1) {
+        const segment = bytes.subarray(from, newline);
+        const observedBytes = pendingBytes + segment.length;
+        if (observedBytes > lineLimitBytes) {
+          failOversizedRecord(observedBytes, lines);
+          return;
+        }
+        lines.push(decodeLine(segment));
+        from = newline + 1;
+        newline = bytes.indexOf(lineFeed, from);
+      }
+
+      const suffix = bytes.subarray(from);
+      const observedBytes = pendingBytes + suffix.length;
+      if (observedBytes > lineLimitBytes) {
+        failOversizedRecord(observedBytes, lines);
+        return;
+      }
+      appendPending(suffix);
+
+      if (lines.length === 0) {
+        if (active) readable.resume();
+        return;
+      }
+      void emit(Effect.succeed(Chunk.fromIterable(lines))).then(
+        () => {
+          if (active) readable.resume();
+        },
+        () => undefined,
+      );
+    };
+    const onEnd = (): void => complete({ _tag: "Ended" }, true);
+    const onError = (cause: unknown): void =>
+      complete({ _tag: "Failed", error: processError("stream", cause) }, true);
+    const onClose = (): void => complete({ _tag: "Ended" }, true);
+
+    readable.on("data", onData);
+    readable.once("end", onEnd);
+    readable.once("close", onClose);
     readable.once("error", onError);
+    const unsubscribe = lifecycle.subscribe(onTerminal);
 
     return Effect.sync(() => {
-      lines.off("line", onLine);
-      lines.off("close", onClose);
+      active = false;
+      clearPending();
+      unsubscribe();
+      readable.pause();
+      readable.off("data", onData);
+      readable.off("end", onEnd);
+      readable.off("close", onClose);
       readable.off("error", onError);
-      lines.close();
     });
-  }, 16);
+  }, streamBufferSize);
 
 const writeToStdin = (
   stdin: Writable | null,
@@ -319,10 +527,22 @@ const makeSpawnedProcess = (
 ): Effect.Effect<SpawnedProcessLaunch, ProcessError> =>
   Effect.gen(function* () {
     const policy = yield* normalizeShutdownPolicy(shutdownPolicy);
+    const stdoutLineLimitBytes =
+      options.stdoutLineLimitBytes ?? defaultStdoutLineLimitBytes;
+    if (
+      !Number.isSafeInteger(stdoutLineLimitBytes) ||
+      stdoutLineLimitBytes <= 0
+    ) {
+      return yield* new ProcessError({
+        operation: "spawn",
+        message: "stdoutLineLimitBytes must be a positive safe integer",
+      });
+    }
     const launch = yield* Deferred.make<void, ProcessError>();
     const exit = yield* Deferred.make<ProcessExit, ProcessError>();
     const stdinEnd = yield* Deferred.make<void, ProcessError>();
     const stdinEndRequested = yield* Ref.make(false);
+    const outputClosed = yield* Ref.make(false);
     const processErrorsRef = yield* Ref.make<ReadonlyArray<ProcessError>>([]);
     const shutdownRef = yield* Ref.make<
       Option.Option<Deferred.Deferred<ProcessShutdownReport>>
@@ -388,18 +608,27 @@ const makeSpawnedProcess = (
       catch: (cause) => processError("spawn", cause),
     });
 
+    const awaitLaunch = Deferred.await(launch);
     const stdin = child.stdin;
     const stdinUnavailable = new ProcessError({
       operation: "stdin",
       message: "stdin is unavailable for a process spawned with ignored stdio",
     });
-    const stdoutLines =
+    const stdoutLifecycle =
       options.stdio === "pipe" && child.stdout !== null
-        ? readableLines(child.stdout)
+        ? makeOutputLifecycle(child.stdout)
+        : undefined;
+    const stderrLifecycle =
+      options.stdio === "pipe" && child.stderr !== null
+        ? makeOutputLifecycle(child.stderr)
+        : undefined;
+    const stdoutLines =
+      child.stdout !== null && stdoutLifecycle !== undefined
+        ? readableLines(child.stdout, stdoutLifecycle, stdoutLineLimitBytes)
         : Stream.empty;
     const stderrChunks =
-      options.stdio === "pipe" && child.stderr !== null
-        ? readableChunks(child.stderr)
+      child.stderr !== null && stderrLifecycle !== undefined
+        ? readableChunks(child.stderr, stderrLifecycle)
         : Stream.empty;
     const waitForExit = Deferred.await(exit);
     const terminalResult: Effect.Effect<ProcessTerminalResult> =
@@ -498,12 +727,27 @@ const makeSpawnedProcess = (
       catch: (cause) => processError("unref", cause),
     });
 
+    const closeOutput = Ref.getAndSet(outputClosed, true).pipe(
+      Effect.flatMap((alreadyClosed) =>
+        alreadyClosed
+          ? Effect.void
+          : Effect.sync(() => {
+              stdoutLifecycle?.complete({ _tag: "Abandoned" });
+              stderrLifecycle?.complete({ _tag: "Abandoned" });
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+            }),
+      ),
+      Effect.catchAllCause(() => Effect.void),
+    );
+
     const abandonLocalHandles = Effect.sync(() => {
       child.stdin?.destroy();
-      child.stdout?.destroy();
-      child.stderr?.destroy();
       child.unref();
-    }).pipe(Effect.catchAllCause(() => Effect.void));
+    }).pipe(
+      Effect.catchAllCause(() => Effect.void),
+      Effect.zipRight(closeOutput),
+    );
 
     const runShutdown: Effect.Effect<ProcessShutdownReport> = Effect.gen(
       function* () {
@@ -633,6 +877,8 @@ const makeSpawnedProcess = (
           writeToStdin(stdin, (complete) => {
             stdin?.write(value, "utf8", complete);
           }),
+        awaitLaunch,
+        closeOutput,
         requestStdinEnd,
         awaitStdinEnd,
         endStdin: requestStdinEnd.pipe(Effect.zipRight(awaitStdinEnd)),
@@ -643,7 +889,7 @@ const makeSpawnedProcess = (
         unref,
         shutdown,
       } satisfies ManagedProcess,
-      awaitLaunch: Deferred.await(launch),
+      awaitLaunch,
     } satisfies SpawnedProcessLaunch;
   });
 
@@ -657,7 +903,11 @@ const spawnScoped = (
     makeSpawnedProcess(command, args, options, shutdownPolicy).pipe(
       Effect.map((launch) => launch.managed),
     ),
-    (managed) => managed.shutdown.pipe(Effect.asVoid),
+    (managed) =>
+      managed.shutdown.pipe(
+        Effect.ensuring(managed.closeOutput),
+        Effect.asVoid,
+      ),
   );
 
 const spawnDetached = (

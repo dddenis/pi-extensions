@@ -155,9 +155,9 @@ describe("readOpenAiRateLimits", () => {
           `${encodeInitializeRequest()}\n`,
         ]);
 
-        yield* controls.emitStdout("not json");
-        yield* controls.emitStdout(JSON.stringify({ id: 99, result: {} }));
-        yield* controls.emitStdout(initializeResult);
+        yield* controls.emitStdout(0, "not json");
+        yield* controls.emitStdout(0, JSON.stringify({ id: 99, result: {} }));
+        yield* controls.emitStdout(0, initializeResult);
         yield* waitFor(
           controls.getState.pipe(
             Effect.map((state) => state.stdinWrites.length === 2),
@@ -168,9 +168,9 @@ describe("readOpenAiRateLimits", () => {
           `${encodeRateLimitsReadRequest()}\n`,
         ]);
 
-        yield* controls.emitStdout(rateLimitResult);
+        yield* controls.emitStdout(0, rateLimitResult);
         yield* waitForSignalCount(1);
-        yield* controls.emitExit(exit());
+        yield* controls.complete(0, exit());
         expect(yield* Fiber.join(request)).toEqual({
           limitId: "codex",
           primary: { usedPercent: 25 },
@@ -210,9 +210,9 @@ describe("readOpenAiRateLimits", () => {
         for (const line of cases) {
           const request = yield* Effect.fork(readOpenAiRateLimits);
           yield* waitForSpawn;
-          yield* controls.emitStdout(line);
+          yield* controls.emitStdout(0, line);
           yield* waitForSignalCount(1);
-          yield* controls.emitExit(exit());
+          yield* controls.complete(0, exit());
           const result = yield* Effect.either(Fiber.join(request));
           expect(Either.isLeft(result)).toBe(true);
           yield* controls.reset;
@@ -220,12 +220,13 @@ describe("readOpenAiRateLimits", () => {
 
         const request = yield* Effect.fork(readOpenAiRateLimits);
         yield* waitForSpawn;
-        yield* controls.emitStdout(initializeResult);
+        yield* controls.emitStdout(0, initializeResult);
         yield* controls.emitStdout(
+          0,
           JSON.stringify({ id: 2, error: { message: "read failed" } }),
         );
         yield* waitForSignalCount(1);
-        yield* controls.emitExit(exit());
+        yield* controls.complete(0, exit());
         const result = yield* Effect.either(Fiber.join(request));
         expect(Either.isLeft(result)).toBe(true);
       }).pipe(
@@ -243,6 +244,7 @@ describe("readOpenAiRateLimits", () => {
         const processFailure = yield* Effect.fork(readOpenAiRateLimits);
         yield* waitForSpawn;
         yield* controls.emitError(
+          0,
           new ProcessError({ operation: "spawn", message: "codex broke" }),
         );
         const processResult = yield* Effect.either(Fiber.join(processFailure));
@@ -254,9 +256,9 @@ describe("readOpenAiRateLimits", () => {
         yield* controls.reset;
         const earlyExit = yield* Effect.fork(readOpenAiRateLimits);
         yield* waitForSpawn;
-        yield* controls.emitStderr(`discard${"x".repeat(500)}`);
+        yield* controls.emitStderr(0, `discard${"x".repeat(500)}`);
         yield* Effect.yieldNow();
-        yield* controls.emitExit({ code: 7, signal: null });
+        yield* controls.complete(0, { code: 7, signal: null });
         const earlyResult = yield* Effect.either(Fiber.join(earlyExit));
         expect(Either.isLeft(earlyResult)).toBe(true);
         if (Either.isLeft(earlyResult)) {
@@ -317,8 +319,8 @@ describe("readOpenAiRateLimits", () => {
         const controls = yield* ProcessServiceTest;
         const request = yield* Effect.fork(readOpenAiRateLimits);
         yield* waitForSpawn;
-        yield* controls.emitStdout(initializeResult);
-        yield* controls.emitStdout(rateLimitResult);
+        yield* controls.emitStdout(0, initializeResult);
+        yield* controls.emitStdout(0, rateLimitResult);
         yield* waitFor(
           controls.getState.pipe(
             Effect.map((state) => state.stdinEndCount === 1),
@@ -327,7 +329,7 @@ describe("readOpenAiRateLimits", () => {
 
         yield* TestClock.adjust(Duration.millis(100));
         yield* waitForSignalCount(1);
-        yield* controls.emitExit(exit());
+        yield* controls.complete(0, exit());
 
         expect(yield* Fiber.join(request)).toMatchObject({ limitId: "codex" });
         expect((yield* controls.getState).signals).toEqual(["SIGTERM"]);
@@ -348,8 +350,8 @@ describe("readOpenAiRateLimits", () => {
         const controls = yield* ProcessServiceTest;
         const request = yield* Effect.fork(readOpenAiRateLimits);
         yield* waitForSpawn;
-        yield* controls.emitStdout(initializeResult);
-        yield* controls.emitStdout(rateLimitResult);
+        yield* controls.emitStdout(0, initializeResult);
+        yield* controls.emitStdout(0, rateLimitResult);
         yield* waitForSignalCount(1);
 
         expect((yield* controls.getState).stdinEndCount).toBe(1);
@@ -360,7 +362,7 @@ describe("readOpenAiRateLimits", () => {
           "SIGTERM",
           "SIGKILL",
         ]);
-        yield* controls.emitExit(exit("SIGKILL"));
+        yield* controls.complete(0, exit("SIGKILL"));
         expect(yield* Fiber.join(request)).toMatchObject({ limitId: "codex" });
       }).pipe(
         Effect.provide(

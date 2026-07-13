@@ -41,11 +41,96 @@ const shutdownPolicy = {
   totalTimeout: Duration.millis(2_100),
 };
 
+const makePipeChild = () => {
+  const events = new EventEmitter();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(events, {
+    pid: 123,
+    stdin: null,
+    stdout,
+    stderr,
+    kill: () => true,
+    unref: () => undefined,
+  });
+  return { child, events, stderr, stdout };
+};
+
 afterEach(() => {
   spawnOverride.mockReset();
 });
 
 describe("ProcessService.Live", () => {
+  it.effect("acknowledges managed launch before exit", () => {
+    const events = new EventEmitter();
+    const child = Object.assign(events, {
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      kill: (signal: NodeJS.Signals) => {
+        queueMicrotask(() => events.emit("exit", 0, signal));
+        return true;
+      },
+      unref: () => undefined,
+    });
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const managed = yield* processes.spawnScoped(
+        "fake",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      const launch = yield* Effect.fork(managed.awaitLaunch);
+      yield* Effect.yieldNow();
+
+      expect(Option.isNone(yield* Fiber.poll(launch))).toBe(true);
+      events.emit("spawn");
+      yield* Fiber.join(launch);
+      yield* managed.awaitLaunch;
+      expect(spawnOverride).toHaveBeenCalledOnce();
+      events.emit("exit", 0, null);
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect(
+    "replays an immediate spawn failure through launch and exit",
+    () => {
+      const events = new EventEmitter();
+      const child = Object.assign(events, {
+        stdin: null,
+        stdout: null,
+        stderr: null,
+        kill: () => true,
+        unref: () => undefined,
+      });
+      spawnOverride.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          events.emit("error", new Error("spawn failed"));
+        });
+        return child;
+      });
+
+      return Effect.gen(function* () {
+        const processes = yield* ProcessService;
+        const managed = yield* processes
+          .spawnScoped("fake", [], { stdio: "ignore" }, shutdownPolicy)
+          .pipe(Effect.withMaxOpsBeforeYield(10));
+        const launchError = yield* Effect.flip(managed.awaitLaunch);
+        const exitError = yield* Effect.flip(managed.waitForExit);
+
+        expect(launchError).toBe(exitError);
+        expect(exitError).toMatchObject({
+          _tag: "ProcessError",
+          operation: "spawn",
+          message: "spawn failed",
+        });
+      }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+    },
+  );
+
   it.effect(
     "owns an immediate process error before acquisition can be interrupted",
     () => {
@@ -93,6 +178,277 @@ describe("ProcessService.Live", () => {
       }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
     },
   );
+
+  it.effect("completes late output collectors after closeOutput", () => {
+    const { child, events } = makePipeChild();
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const managed = yield* processes.spawnScoped(
+        "closed-output",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      events.emit("spawn");
+      events.emit("exit", 0, null);
+
+      yield* managed.closeOutput;
+
+      expect(yield* collect(managed.stdoutLines)).toEqual([]);
+      expect(yield* collect(managed.stderrChunks)).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect("replays output completion to later collectors", () => {
+    const { child, events, stderr, stdout } = makePipeChild();
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const managed = yield* processes.spawnScoped(
+        "completed-output",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      const firstStdout = yield* Effect.fork(collect(managed.stdoutLines));
+      const firstStderr = yield* Effect.fork(collect(managed.stderrChunks));
+
+      stdout.end("line\n");
+      stderr.end("error text");
+      events.emit("spawn");
+      events.emit("exit", 0, null);
+
+      expect(yield* Fiber.join(firstStdout)).toEqual(["line"]);
+      expect(yield* Fiber.join(firstStderr)).toEqual(["error text"]);
+      expect(yield* collect(managed.stdoutLines)).toEqual([]);
+      expect(yield* collect(managed.stderrChunks)).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect("replays output failures to late collectors", () => {
+    const { child, events, stderr } = makePipeChild();
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const managed = yield* processes.spawnScoped(
+        "failed-output",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      events.emit("spawn");
+      events.emit("exit", 1, null);
+
+      expect(() =>
+        stderr.emit("error", new Error("read failed")),
+      ).not.toThrow();
+      const error = yield* Effect.flip(collect(managed.stderrChunks));
+      expect(error).toMatchObject({
+        _tag: "ProcessError",
+        operation: "stream",
+        message: "read failed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect("closes local output ownership idempotently", () => {
+    const events = new EventEmitter();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdoutDestroy = vi.spyOn(stdout, "destroy");
+    const stderrDestroy = vi.spyOn(stderr, "destroy");
+    const child = Object.assign(events, {
+      stdin: null,
+      stdout,
+      stderr,
+      kill: () => true,
+      unref: () => undefined,
+    });
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const managed = yield* processes.spawnScoped(
+        "held-output",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      events.emit("spawn");
+      events.emit("exit", 0, null);
+
+      yield* managed.closeOutput;
+      yield* managed.closeOutput;
+
+      expect(stdoutDestroy).toHaveBeenCalledTimes(1);
+      expect(stderrDestroy).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect(
+    "releases local output when its scope closes after a terminal result",
+    () => {
+      const events = new EventEmitter();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdoutDestroy = vi.spyOn(stdout, "destroy");
+      const stderrDestroy = vi.spyOn(stderr, "destroy");
+      const child = Object.assign(events, {
+        stdin: null,
+        stdout,
+        stderr,
+        kill: () => true,
+        unref: () => undefined,
+      });
+      spawnOverride.mockReturnValueOnce(child);
+
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const processes = yield* ProcessService;
+          yield* processes.spawnScoped(
+            "held-output-after-exit",
+            [],
+            { stdio: "pipe" },
+            shutdownPolicy,
+          );
+          events.emit("spawn");
+          events.emit("exit", 0, null);
+        }),
+      ).pipe(
+        Effect.zipRight(
+          Effect.sync(() => {
+            expect(stdoutDestroy).toHaveBeenCalledTimes(1);
+            expect(stderrDestroy).toHaveBeenCalledTimes(1);
+          }),
+        ),
+        Effect.provide(ProcessService.Live),
+      );
+    },
+  );
+
+  it.effect("fails stdout when one record exceeds its byte limit", () => {
+    const events = new EventEmitter();
+    const stdout = new PassThrough();
+    const stdoutDestroy = vi.spyOn(stdout, "destroy");
+    const child = Object.assign(events, {
+      stdin: null,
+      stdout,
+      stderr: null,
+      kill: () => true,
+      unref: () => undefined,
+    });
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const spawned = yield* processes.spawnScoped(
+        "oversized-stdout",
+        [],
+        { stdio: "pipe", stdoutLineLimitBytes: 4 },
+        shutdownPolicy,
+      );
+      const received: Array<string> = [];
+      const consumer = yield* Effect.fork(
+        Stream.runForEach(spawned.stdoutLines, (line) =>
+          Effect.sync(() => {
+            received.push(line);
+          }),
+        ),
+      );
+      events.emit("spawn");
+
+      stdout.write("ok\nab");
+      stdout.end("cde");
+      events.emit("exit", 1, null);
+
+      const error = yield* Effect.flip(Fiber.join(consumer));
+      expect(error).toMatchObject({
+        _tag: "ProcessError",
+        operation: "stream",
+        reason: "record-too-large",
+        stream: "stdout",
+        limitBytes: 4,
+        observedBytes: 5,
+      });
+      expect(received).toEqual(["ok"]);
+      expect(stdoutDestroy).toHaveBeenCalled();
+
+      const replayed = yield* Effect.flip(collect(spawned.stdoutLines));
+      expect(replayed).toEqual(error);
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect("backpressures stdout after its sixteen-chunk buffer fills", () => {
+    const events = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(events, {
+      stdin: null,
+      stdout,
+      stderr: null,
+      kill: () => true,
+      unref: () => undefined,
+    });
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const spawned = yield* processes.spawnScoped(
+        "bursty-stdout",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      const firstLine = yield* Deferred.make<void>();
+      const releaseConsumer = yield* Deferred.make<void>();
+      const received: Array<string> = [];
+      const consumer = yield* Effect.fork(
+        Stream.runForEach(spawned.stdoutLines, (line) =>
+          Effect.gen(function* () {
+            received.push(line);
+            if (received.length === 1) {
+              yield* Deferred.succeed(firstLine, undefined);
+              yield* Deferred.await(releaseConsumer);
+            }
+          }),
+        ),
+      );
+
+      stdout.write("0\n");
+      yield* Deferred.await(firstLine);
+      for (let index = 1; index < 17; index += 1) {
+        stdout.write(`${String(index).padStart(2, "0")}\n`);
+      }
+      yield* Effect.promise(
+        () => new Promise<void>((resolve) => setImmediate(resolve)),
+      );
+      expect(stdout.isPaused()).toBe(false);
+
+      stdout.write("17\n");
+      yield* Effect.promise(
+        () => new Promise<void>((resolve) => setImmediate(resolve)),
+      );
+      const pausedWhileBlocked = stdout.isPaused();
+      const receivedWhileBlocked = [...received];
+      stdout.end();
+
+      yield* Deferred.succeed(releaseConsumer, undefined);
+      yield* Fiber.join(consumer);
+      events.emit("exit", 0, null);
+
+      expect(pausedWhileBlocked).toBe(true);
+      expect(receivedWhileBlocked).toEqual(["0"]);
+      expect(received).toEqual([
+        "0",
+        ...Array.from({ length: 17 }, (_, index) =>
+          String(index + 1).padStart(2, "0"),
+        ),
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
 
   it.effect("backpressures stderr after its sixteen-chunk buffer fills", () => {
     const events = new EventEmitter();

@@ -7,11 +7,10 @@ import {
   Either,
   Fiber,
   Layer,
+  Mailbox,
   Option,
-  Queue,
   Ref,
   Stream,
-  Take,
 } from "effect";
 import {
   type ManagedProcess,
@@ -25,12 +24,25 @@ import {
 
 export interface ProcessServiceTestConfig {
   readonly stdinEnd?: "complete" | "never";
+  readonly manualLaunch?: boolean;
 }
 
 export interface ProcessServiceTestCall {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly options: SpawnProcessOptions;
+}
+
+export interface ProcessServiceTestProcessState {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly options: SpawnProcessOptions;
+  readonly stdinWrites: ReadonlyArray<string>;
+  readonly stdinEndCount: number;
+  readonly signals: ReadonlyArray<"SIGTERM" | "SIGKILL">;
+  readonly lifecycleEvents: ReadonlyArray<string>;
+  readonly outputCloseCount: number;
+  readonly unrefCount: number;
 }
 
 export interface ProcessServiceTestState {
@@ -41,31 +53,64 @@ export interface ProcessServiceTestState {
   readonly stdinEndCount: number;
   readonly signals: ReadonlyArray<"SIGTERM" | "SIGKILL">;
   readonly lifecycleEvents: ReadonlyArray<string>;
+  readonly outputCloseCount: number;
   readonly unrefCount: number;
+  readonly processes: ReadonlyArray<ProcessServiceTestProcessState>;
 }
 
 export interface ProcessServiceTestService {
-  readonly emitStdout: (line: string) => Effect.Effect<void>;
-  readonly emitStderr: (chunk: string) => Effect.Effect<void>;
-  readonly emitExit: (exit: ProcessExit) => Effect.Effect<void>;
-  readonly emitError: (error: ProcessError) => Effect.Effect<void>;
+  readonly emitLaunch: (index: number) => Effect.Effect<void>;
+  readonly emitLaunchFailure: (
+    index: number,
+    error: ProcessError,
+  ) => Effect.Effect<void>;
+  readonly emitStdout: (index: number, line: string) => Effect.Effect<void>;
+  readonly emitStdoutFailure: (
+    index: number,
+    error: ProcessError,
+  ) => Effect.Effect<void>;
+  readonly emitStderr: (index: number, chunk: string) => Effect.Effect<void>;
+  readonly emitExit: (index: number, exit: ProcessExit) => Effect.Effect<void>;
+  readonly emitOutputEnd: (index: number) => Effect.Effect<void>;
+  readonly complete: (index: number, exit: ProcessExit) => Effect.Effect<void>;
+  readonly emitError: (
+    index: number,
+    error: ProcessError,
+  ) => Effect.Effect<void>;
+  readonly emitPostLaunchError: (
+    index: number,
+    error: ProcessError,
+  ) => Effect.Effect<void>;
   readonly getState: Effect.Effect<ProcessServiceTestState>;
   readonly resetCalls: Effect.Effect<void>;
   readonly reset: Effect.Effect<void>;
 }
 
-type ProcessEventQueue = Queue.Queue<Take.Take<string, ProcessError>>;
+type ProcessEventMailbox = Mailbox.Mailbox<string, ProcessError>;
 type TestSpawnedProcess = SpawnedProcess &
-  Pick<ManagedProcess, "requestStdinEnd" | "awaitStdinEnd">;
+  Pick<
+    ManagedProcess,
+    "awaitLaunch" | "closeOutput" | "requestStdinEnd" | "awaitStdinEnd"
+  > & {
+    readonly index: number;
+    readonly exit: Deferred.Deferred<ProcessExit, ProcessError>;
+    readonly stdinAvailable: boolean;
+  };
 
-interface ActiveProcess {
+interface ProcessServiceTestInternalProcessState extends ProcessServiceTestProcessState {
+  readonly index: number;
+  readonly launch: Deferred.Deferred<void, ProcessError>;
   readonly exit: Deferred.Deferred<ProcessExit, ProcessError>;
-  readonly stdout: ProcessEventQueue;
-  readonly stderr: ProcessEventQueue;
+  readonly stdout: ProcessEventMailbox;
+  readonly stderr: ProcessEventMailbox;
+  readonly processErrors: ReadonlyArray<ProcessError>;
 }
 
-interface ProcessServiceTestInternalState extends ProcessServiceTestState {
-  readonly active?: ActiveProcess;
+interface ProcessServiceTestInternalState extends Omit<
+  ProcessServiceTestState,
+  "processes"
+> {
+  readonly processes: ReadonlyArray<ProcessServiceTestInternalProcessState>;
 }
 
 type ProcessServiceTestRef = Ref.Ref<ProcessServiceTestInternalState>;
@@ -78,13 +123,18 @@ const initialState = (): ProcessServiceTestInternalState => ({
   stdinEndCount: 0,
   signals: [],
   lifecycleEvents: [],
+  outputCloseCount: 0,
   unrefCount: 0,
+  processes: [],
 });
 
 const copyOptions = (options: SpawnProcessOptions): SpawnProcessOptions => ({
   ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
   ...(options.env === undefined ? {} : { env: { ...options.env } }),
   ...(options.detached === undefined ? {} : { detached: options.detached }),
+  ...(options.stdoutLineLimitBytes === undefined
+    ? {}
+    : { stdoutLineLimitBytes: options.stdoutLineLimitBytes }),
   stdio: options.stdio,
 });
 
@@ -92,6 +142,20 @@ const copyCall = (call: ProcessServiceTestCall): ProcessServiceTestCall => ({
   command: call.command,
   args: [...call.args],
   options: copyOptions(call.options),
+});
+
+const copyProcess = (
+  process: ProcessServiceTestInternalProcessState,
+): ProcessServiceTestProcessState => ({
+  command: process.command,
+  args: [...process.args],
+  options: copyOptions(process.options),
+  stdinWrites: [...process.stdinWrites],
+  stdinEndCount: process.stdinEndCount,
+  signals: [...process.signals],
+  lifecycleEvents: [...process.lifecycleEvents],
+  outputCloseCount: process.outputCloseCount,
+  unrefCount: process.unrefCount,
 });
 
 const snapshotState = (
@@ -106,28 +170,52 @@ const snapshotState = (
       stdinEndCount: state.stdinEndCount,
       signals: [...state.signals],
       lifecycleEvents: [...state.lifecycleEvents],
+      outputCloseCount: state.outputCloseCount,
       unrefCount: state.unrefCount,
+      processes: state.processes.map(copyProcess),
     })),
   );
 
-const activeProcess = (
+const updateProcessAt = (
+  state: ProcessServiceTestInternalState,
+  index: number,
+  update: (
+    process: ProcessServiceTestInternalProcessState,
+  ) => ProcessServiceTestInternalProcessState,
+): ReadonlyArray<ProcessServiceTestInternalProcessState> =>
+  state.processes.map((process, processIndex) =>
+    processIndex === index ? update(process) : process,
+  );
+
+const processAtIndex = (
   ref: ProcessServiceTestRef,
+  index: number,
   operation: string,
-): Effect.Effect<ActiveProcess> =>
+): Effect.Effect<ProcessServiceTestInternalProcessState> =>
   Ref.get(ref).pipe(
-    Effect.flatMap((state) =>
-      state.active === undefined
+    Effect.flatMap((state) => {
+      const process = state.processes[index];
+      return process === undefined
         ? Effect.die(
             new Error(
-              `ProcessServiceTest.${operation} requires a spawned process`,
+              `ProcessServiceTest.${operation} requires a spawned process at index ${index}`,
             ),
           )
-        : Effect.succeed(state.active),
-    ),
+        : Effect.succeed(process);
+    }),
   );
 
 const copyError = (error: ProcessError): ProcessError =>
-  new ProcessError({ operation: error.operation, message: error.message });
+  new ProcessError({
+    operation: error.operation,
+    message: error.message,
+    ...(error.reason === undefined ? {} : { reason: error.reason }),
+    ...(error.stream === undefined ? {} : { stream: error.stream }),
+    ...(error.limitBytes === undefined ? {} : { limitBytes: error.limitBytes }),
+    ...(error.observedBytes === undefined
+      ? {}
+      : { observedBytes: error.observedBytes }),
+  });
 
 const makeProcessService = (
   ref: ProcessServiceTestRef,
@@ -139,78 +227,180 @@ const makeProcessService = (
     options: SpawnProcessOptions,
   ): Effect.Effect<TestSpawnedProcess> =>
     Effect.gen(function* () {
+      const launch = yield* Deferred.make<void, ProcessError>();
       const exit = yield* Deferred.make<ProcessExit, ProcessError>();
       const stdinEnd = yield* Deferred.make<void>();
       const stdinEndRequested = yield* Ref.make(false);
-      const stdout = yield* Queue.unbounded<Take.Take<string, ProcessError>>();
-      const stderr = yield* Queue.unbounded<Take.Take<string, ProcessError>>();
-      const active = { exit, stdout, stderr };
+      const outputClosed = yield* Ref.make(false);
+      const stdout = yield* Mailbox.make<string, ProcessError>();
+      const stderr = yield* Mailbox.make<string, ProcessError>();
+      const index = yield* Ref.modify(ref, (state) => {
+        const process = {
+          index: state.processes.length,
+          command,
+          args: [...args],
+          options: copyOptions(options),
+          stdinWrites: [],
+          stdinEndCount: 0,
+          signals: [],
+          lifecycleEvents: [],
+          outputCloseCount: 0,
+          unrefCount: 0,
+          launch,
+          exit,
+          stdout,
+          stderr,
+          processErrors: [],
+        } satisfies ProcessServiceTestInternalProcessState;
+        return [
+          state.processes.length,
+          {
+            ...state,
+            calls: [
+              ...state.calls,
+              {
+                command,
+                args: [...args],
+                options: copyOptions(options),
+              },
+            ],
+            processes: [...state.processes, process],
+          },
+        ] as const;
+      });
 
-      yield* Ref.update(ref, (state) => ({
-        ...state,
-        active,
-        calls: [
-          ...state.calls,
-          { command, args: [...args], options: copyOptions(options) },
-        ],
-      }));
+      if (config.manualLaunch !== true) {
+        yield* Deferred.succeed(launch, undefined).pipe(Effect.asVoid);
+      }
 
-      const requestStdinEnd = Ref.getAndSet(stdinEndRequested, true).pipe(
-        Effect.flatMap((alreadyRequested) =>
-          alreadyRequested
-            ? Effect.void
-            : Ref.update(ref, (state) => ({
-                ...state,
-                stdinEndCount: state.stdinEndCount + 1,
-                lifecycleEvents: [...state.lifecycleEvents, "shutdown-started"],
-              })).pipe(
-                Effect.zipRight(
-                  config.stdinEnd === "never"
-                    ? Effect.void
-                    : Deferred.succeed(stdinEnd, undefined).pipe(Effect.asVoid),
-                ),
+      const stdinUnavailable = new ProcessError({
+        operation: "stdin",
+        message:
+          "stdin is unavailable for a process spawned with ignored stdio",
+      });
+      const requestStdinEnd =
+        options.stdio === "ignore"
+          ? Effect.fail(stdinUnavailable)
+          : Ref.getAndSet(stdinEndRequested, true).pipe(
+              Effect.flatMap((alreadyRequested) =>
+                alreadyRequested
+                  ? Effect.void
+                  : Ref.update(ref, (state) => ({
+                      ...state,
+                      stdinEndCount: state.stdinEndCount + 1,
+                      lifecycleEvents: [
+                        ...state.lifecycleEvents,
+                        "shutdown-started",
+                      ],
+                      processes: updateProcessAt(state, index, (process) => ({
+                        ...process,
+                        stdinEndCount: process.stdinEndCount + 1,
+                        lifecycleEvents: [
+                          ...process.lifecycleEvents,
+                          "shutdown-started",
+                        ],
+                      })),
+                    })).pipe(
+                      Effect.zipRight(
+                        config.stdinEnd === "never"
+                          ? Effect.void
+                          : Deferred.succeed(stdinEnd, undefined).pipe(
+                              Effect.asVoid,
+                            ),
+                      ),
+                    ),
               ),
-        ),
-      );
+            );
+      const awaitStdinEnd =
+        options.stdio === "ignore"
+          ? Effect.fail(stdinUnavailable)
+          : Deferred.await(stdinEnd);
+      const waitForExit = Deferred.await(exit);
 
       return {
-        writeStdin: (value) =>
-          Ref.update(ref, (state) => ({
-            ...state,
-            stdinWrites: [...state.stdinWrites, value],
-          })),
-        requestStdinEnd,
-        awaitStdinEnd: Deferred.await(stdinEnd),
-        endStdin: requestStdinEnd.pipe(
-          Effect.zipRight(Deferred.await(stdinEnd)),
+        index,
+        exit,
+        awaitLaunch: Deferred.await(launch),
+        stdinAvailable: options.stdio !== "ignore",
+        closeOutput: Ref.getAndSet(outputClosed, true).pipe(
+          Effect.flatMap((alreadyClosed) =>
+            alreadyClosed
+              ? Effect.void
+              : Ref.update(ref, (state) => ({
+                  ...state,
+                  outputCloseCount: state.outputCloseCount + 1,
+                  lifecycleEvents: [...state.lifecycleEvents, "output-closed"],
+                  processes: updateProcessAt(state, index, (process) => ({
+                    ...process,
+                    outputCloseCount: process.outputCloseCount + 1,
+                    lifecycleEvents: [
+                      ...process.lifecycleEvents,
+                      "output-closed",
+                    ],
+                  })),
+                })).pipe(
+                  Effect.zipRight(stdout.end),
+                  Effect.zipRight(stderr.end),
+                  Effect.asVoid,
+                ),
+          ),
         ),
-        stdoutLines: Stream.fromQueue(stdout).pipe(
-          Stream.flattenTake,
+        writeStdin:
+          options.stdio === "ignore"
+            ? () => Effect.fail(stdinUnavailable)
+            : (value) =>
+                Ref.update(ref, (state) => ({
+                  ...state,
+                  stdinWrites: [...state.stdinWrites, value],
+                  processes: updateProcessAt(state, index, (process) => ({
+                    ...process,
+                    stdinWrites: [...process.stdinWrites, value],
+                  })),
+                })),
+        requestStdinEnd,
+        awaitStdinEnd,
+        endStdin: requestStdinEnd.pipe(Effect.zipRight(awaitStdinEnd)),
+        stdoutLines: Mailbox.toStream(stdout).pipe(
           Stream.ensuring(
             Ref.update(ref, (state) => ({
               ...state,
               lifecycleEvents: [...state.lifecycleEvents, "stdout-stopped"],
+              processes: updateProcessAt(state, index, (process) => ({
+                ...process,
+                lifecycleEvents: [...process.lifecycleEvents, "stdout-stopped"],
+              })),
             })),
           ),
         ),
-        stderrChunks: Stream.fromQueue(stderr).pipe(
-          Stream.flattenTake,
+        stderrChunks: Mailbox.toStream(stderr).pipe(
           Stream.ensuring(
             Ref.update(ref, (state) => ({
               ...state,
               lifecycleEvents: [...state.lifecycleEvents, "stderr-stopped"],
+              processes: updateProcessAt(state, index, (process) => ({
+                ...process,
+                lifecycleEvents: [...process.lifecycleEvents, "stderr-stopped"],
+              })),
             })),
           ),
         ),
-        waitForExit: Deferred.await(exit),
+        waitForExit,
         kill: (signal) =>
           Ref.update(ref, (state) => ({
             ...state,
             signals: [...state.signals, signal],
+            processes: updateProcessAt(state, index, (process) => ({
+              ...process,
+              signals: [...process.signals, signal],
+            })),
           })),
         unref: Ref.update(ref, (state) => ({
           ...state,
           unrefCount: state.unrefCount + 1,
+          processes: updateProcessAt(state, index, (process) => ({
+            ...process,
+            unrefCount: process.unrefCount + 1,
+          })),
         })),
       } satisfies TestSpawnedProcess;
     });
@@ -241,20 +431,33 @@ const makeProcessService = (
       const startedAt = yield* Clock.currentTimeMillis;
       const hardDeadline = startedAt + durationMillis(policy.totalTimeout);
       const signalsAttempted: Array<"SIGTERM" | "SIGKILL"> = [];
-      const stdin = yield* awaitWithin(
-        Effect.either(
-          child.requestStdinEnd.pipe(Effect.zipRight(child.awaitStdinEnd)),
-        ),
-        policy.stdinCloseTimeout,
-        hardDeadline,
-      );
-      signalsAttempted.push("SIGTERM");
-      yield* child.kill("SIGTERM").pipe(Effect.ignore);
-      let terminal = yield* awaitWithin(
-        Effect.either(child.waitForExit),
-        policy.gracefulTimeout,
-        hardDeadline,
-      );
+      let terminal = (yield* Deferred.isDone(child.exit))
+        ? Option.some(yield* Effect.either(child.waitForExit))
+        : Option.none<Either.Either<ProcessExit, ProcessError>>();
+      const stdin =
+        child.stdinAvailable && Option.isNone(terminal)
+          ? yield* awaitWithin(
+              Effect.either(
+                child.requestStdinEnd.pipe(
+                  Effect.zipRight(child.awaitStdinEnd),
+                ),
+              ),
+              policy.stdinCloseTimeout,
+              hardDeadline,
+            )
+          : child.stdinAvailable
+            ? Option.some(Either.right(undefined))
+            : undefined;
+
+      if (Option.isNone(terminal)) {
+        signalsAttempted.push("SIGTERM");
+        yield* child.kill("SIGTERM").pipe(Effect.ignore);
+        terminal = yield* awaitWithin(
+          Effect.either(child.waitForExit),
+          policy.gracefulTimeout,
+          hardDeadline,
+        );
+      }
       if (Option.isNone(terminal)) {
         signalsAttempted.push("SIGKILL");
         yield* child.kill("SIGKILL").pipe(Effect.ignore);
@@ -267,17 +470,31 @@ const makeProcessService = (
 
       const completedAt = yield* Clock.currentTimeMillis;
       const terminalUnconfirmed = Option.isNone(terminal);
+      if (terminalUnconfirmed) {
+        yield* child.unref.pipe(
+          Effect.catchAllCause(() => Effect.void),
+          Effect.zipRight(child.closeOutput),
+        );
+      }
+      const currentProcess = yield* processAtIndex(
+        ref,
+        child.index,
+        "shutdown",
+      );
       return {
-        stdin: Option.match(stdin, {
-          onNone: () => ({ _tag: "TimedOut" }) as const,
-          onSome: Either.match({
-            onLeft: (error) => ({ _tag: "Failed" as const, error }),
-            onRight: () => ({ _tag: "Completed" }) as const,
-          }),
-        }),
+        stdin:
+          stdin === undefined
+            ? ({ _tag: "Unavailable" } as const)
+            : Option.match(stdin, {
+                onNone: () => ({ _tag: "TimedOut" }) as const,
+                onSome: Either.match({
+                  onLeft: (error) => ({ _tag: "Failed" as const, error }),
+                  onRight: () => ({ _tag: "Completed" }) as const,
+                }),
+              }),
         signalsAttempted,
         signalErrors: [],
-        processErrors: [],
+        processErrors: currentProcess.processErrors.map(copyError),
         ...(Option.isSome(terminal)
           ? {
               terminal: Either.match(terminal.value, {
@@ -297,12 +514,13 @@ const makeProcessService = (
         ),
       ),
     ).pipe(
-      Effect.map((shutdown) => ({
-        ...child,
-        requestStdinEnd: child.requestStdinEnd,
-        awaitStdinEnd: child.awaitStdinEnd,
-        shutdown,
-      })),
+      Effect.map(
+        (shutdown) =>
+          ({
+            ...child,
+            shutdown,
+          }) satisfies ManagedProcess,
+      ),
     );
   };
 
@@ -317,23 +535,34 @@ const makeProcessService = (
             spawnProcess(command, args, options).pipe(
               Effect.flatMap((child) => managed(child, policy)),
             ),
-            (child) => child.shutdown.pipe(Effect.asVoid),
+            (child) =>
+              child.shutdown.pipe(
+                Effect.ensuring(child.closeOutput),
+                Effect.asVoid,
+              ),
           ),
         ),
       ),
     spawnDetached: (command, args, options) =>
-      Ref.update(ref, (state) => ({
-        ...state,
-        detachedSpawnCount: state.detachedSpawnCount + 1,
-      })).pipe(
-        Effect.zipRight(
-          spawnProcess(command, args, {
-            ...options,
-            detached: true,
-            stdio: "ignore",
-          }),
+      Effect.uninterruptibleMask((restore) =>
+        Ref.update(ref, (state) => ({
+          ...state,
+          detachedSpawnCount: state.detachedSpawnCount + 1,
+        })).pipe(
+          Effect.zipRight(
+            spawnProcess(command, args, {
+              ...options,
+              detached: true,
+              stdio: "ignore",
+            }),
+          ),
+          Effect.flatMap((child) =>
+            restore(child.awaitLaunch).pipe(
+              Effect.onInterrupt(() => child.unref.pipe(Effect.ignore)),
+              Effect.zipRight(child.unref),
+            ),
+          ),
         ),
-        Effect.flatMap((child) => child.unref),
       ),
   };
 };
@@ -341,36 +570,90 @@ const makeProcessService = (
 const makeProcessServiceTest = (
   ref: ProcessServiceTestRef,
 ): ProcessServiceTestService => ({
-  emitStdout: (line) =>
-    activeProcess(ref, "emitStdout").pipe(
-      Effect.flatMap((active) => Queue.offer(active.stdout, Take.of(line))),
+  emitLaunch: (index) =>
+    processAtIndex(ref, index, "emitLaunch").pipe(
+      Effect.flatMap((process) =>
+        Deferred.succeed(process.launch, undefined).pipe(Effect.asVoid),
+      ),
+    ),
+  emitLaunchFailure: (index, error) =>
+    processAtIndex(ref, index, "emitLaunchFailure").pipe(
+      Effect.flatMap((process) => {
+        const copiedError = copyError(error);
+        return Deferred.fail(process.launch, copiedError).pipe(
+          Effect.flatMap((pendingLaunch) =>
+            pendingLaunch
+              ? Deferred.fail(process.exit, copiedError).pipe(
+                  Effect.zipRight(process.stdout.end),
+                  Effect.zipRight(process.stderr.end),
+                )
+              : Effect.void,
+          ),
+        );
+      }),
       Effect.asVoid,
     ),
-  emitStderr: (chunk) =>
-    activeProcess(ref, "emitStderr").pipe(
-      Effect.flatMap((active) => Queue.offer(active.stderr, Take.of(chunk))),
+  emitStdout: (index, line) =>
+    processAtIndex(ref, index, "emitStdout").pipe(
+      Effect.flatMap((process) => process.stdout.offer(line)),
       Effect.asVoid,
     ),
-  emitExit: (processExit) =>
-    activeProcess(ref, "emitExit").pipe(
-      Effect.flatMap((active) =>
-        Deferred.succeed(active.exit, { ...processExit }).pipe(
-          Effect.zipRight(Queue.offer(active.stdout, Take.end)),
-          Effect.zipRight(Queue.offer(active.stderr, Take.end)),
+  emitStdoutFailure: (index, error) =>
+    processAtIndex(ref, index, "emitStdoutFailure").pipe(
+      Effect.flatMap((process) => process.stdout.fail(copyError(error))),
+      Effect.asVoid,
+    ),
+  emitStderr: (index, chunk) =>
+    processAtIndex(ref, index, "emitStderr").pipe(
+      Effect.flatMap((process) => process.stderr.offer(chunk)),
+      Effect.asVoid,
+    ),
+  emitExit: (index, processExit) =>
+    processAtIndex(ref, index, "emitExit").pipe(
+      Effect.flatMap((process) =>
+        Deferred.succeed(process.exit, { ...processExit }),
+      ),
+      Effect.asVoid,
+    ),
+  emitOutputEnd: (index) =>
+    processAtIndex(ref, index, "emitOutputEnd").pipe(
+      Effect.flatMap((process) =>
+        process.stdout.end.pipe(Effect.zipRight(process.stderr.end)),
+      ),
+      Effect.asVoid,
+    ),
+  complete: (index, processExit) =>
+    processAtIndex(ref, index, "complete").pipe(
+      Effect.flatMap((process) =>
+        Deferred.succeed(process.exit, { ...processExit }).pipe(
+          Effect.zipRight(process.stdout.end),
+          Effect.zipRight(process.stderr.end),
         ),
       ),
       Effect.asVoid,
     ),
-  emitError: (error) =>
-    activeProcess(ref, "emitError").pipe(
-      Effect.flatMap((active) => {
+  emitError: (index, error) =>
+    processAtIndex(ref, index, "emitError").pipe(
+      Effect.flatMap((process) => {
         const copiedError = copyError(error);
-        return Deferred.fail(active.exit, copiedError).pipe(
-          Effect.zipRight(Queue.offer(active.stdout, Take.fail(copiedError))),
-          Effect.zipRight(Queue.offer(active.stderr, Take.fail(copiedError))),
+        return Deferred.fail(process.exit, copiedError).pipe(
+          Effect.zipRight(process.stdout.fail(copiedError)),
+          Effect.zipRight(process.stderr.fail(copiedError)),
         );
       }),
       Effect.asVoid,
+    ),
+  emitPostLaunchError: (index, error) =>
+    processAtIndex(ref, index, "emitPostLaunchError").pipe(
+      Effect.zipRight(
+        Ref.update(ref, (state) => ({
+          ...state,
+          processes: updateProcessAt(state, index, (process) => ({
+            ...process,
+            processErrors: [...process.processErrors, copyError(error)],
+          })),
+        })),
+      ),
     ),
   getState: snapshotState(ref),
   resetCalls: Ref.update(ref, (state) => ({
@@ -382,7 +665,17 @@ const makeProcessServiceTest = (
     stdinEndCount: 0,
     signals: [],
     lifecycleEvents: [],
+    outputCloseCount: 0,
     unrefCount: 0,
+    processes: state.processes.map((process) => ({
+      ...process,
+      stdinWrites: [],
+      stdinEndCount: 0,
+      signals: [],
+      lifecycleEvents: [],
+      outputCloseCount: 0,
+      unrefCount: 0,
+    })),
   })),
   reset: Ref.set(ref, initialState()),
 });
