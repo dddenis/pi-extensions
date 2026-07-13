@@ -9,6 +9,35 @@ class RuntimeValue extends Context.Tag("RuntimeValue")<
 >() {}
 
 describe("makeEffectRunner", () => {
+  it("forwards abort signals to runPromise", async () => {
+    const runner = makeEffectRunner(Layer.empty);
+    const controller = new AbortController();
+    let finalized = false;
+    let resolveStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const promise = runner.runPromise(
+      Effect.acquireUseRelease(
+        Effect.sync(() => {
+          resolveStarted();
+        }),
+        () => Effect.never,
+        () =>
+          Effect.sync(() => {
+            finalized = true;
+          }),
+      ),
+      { signal: controller.signal },
+    );
+
+    await started;
+    controller.abort();
+    await expect(promise).rejects.toBeDefined();
+    expect(finalized).toBe(true);
+    await runner.dispose();
+  }, 1_000);
+
   it("runs effects and disposes its managed layer exactly once", async () => {
     let acquisitions = 0;
     let releases = 0;

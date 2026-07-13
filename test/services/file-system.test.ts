@@ -1,3 +1,4 @@
+import { win32 } from "node:path";
 import { describe, it } from "@effect/vitest";
 import { Cause, Effect, Exit, Option } from "effect";
 import { expect } from "vitest";
@@ -173,6 +174,39 @@ describe("FileSystemServiceTest", () => {
     );
   });
 
+  it.effect(
+    "returns configured mutation failures without changing content",
+    () => {
+      const path = "/runs/status.json";
+      const denied = new FileSystemError({
+        operation: "writeTextFile",
+        path,
+        message: "permission denied",
+      });
+
+      return Effect.gen(function* () {
+        const fileSystem = yield* FileSystemService;
+        const controls = yield* FileSystemServiceTest;
+
+        expect(
+          yield* Effect.flip(
+            fileSystem.writeTextFile(path, "changed\n", { mode: 0o600 }),
+          ),
+        ).toEqual(denied);
+        expect((yield* controls.getState).contents).toEqual(
+          new Map([[path, "original\n"]]),
+        );
+      }).pipe(
+        Effect.provide(
+          FileSystemServiceTest.layer({
+            contents: new Map([[path, "original\n"]]),
+            failures: new Map([["writeTextFile", new Map([[path, denied]])]]),
+          }),
+        ),
+      );
+    },
+  );
+
   it.effect("returns copied call and map snapshots", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystemService;
@@ -198,6 +232,324 @@ describe("FileSystemServiceTest", () => {
         }),
       ),
     ),
+  );
+
+  it.effect(
+    "serves configured directories, metadata, and real paths and records mutation calls",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystemService;
+        const controls = yield* FileSystemServiceTest;
+
+        expect(yield* fileSystem.readDirectory("/agents")).toEqual([
+          { name: "reader.md", kind: "file" },
+        ]);
+        expect(yield* fileSystem.stat("/agents")).toEqual({
+          kind: "directory",
+          mtimeMs: 1,
+          mode: 0o700,
+        });
+        expect(yield* fileSystem.realPath("/agents")).toBe("/real/agents");
+
+        yield* fileSystem.writeTextFile("/runs/status.json", "{}\n", {
+          mode: 0o600,
+        });
+        yield* fileSystem.rename("/runs/status.json", "/runs/status.old.json");
+
+        const state = yield* controls.getState;
+        expect(state.calls).toContainEqual({
+          operation: "writeTextFile",
+          path: "/runs/status.json",
+          content: "{}\n",
+          mode: 0o600,
+        });
+        expect(state.calls).toContainEqual({
+          operation: "rename",
+          path: "/runs/status.json -> /runs/status.old.json",
+          from: "/runs/status.json",
+          to: "/runs/status.old.json",
+        });
+      }).pipe(
+        Effect.provide(
+          FileSystemServiceTest.layer({
+            directories: new Map([
+              ["/agents", [{ name: "reader.md", kind: "file" }]],
+            ]),
+            metadata: new Map([
+              ["/agents", { kind: "directory", mtimeMs: 1, mode: 0o700 }],
+            ]),
+            realPaths: new Map([["/agents", "/real/agents"]]),
+          }),
+        ),
+      ),
+  );
+
+  it.effect("treats rename with an unknown source as unconfigured", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystemService;
+      const controls = yield* FileSystemServiceTest;
+      const source = "/runs/missing.tmp";
+      const target = "/runs/status.json";
+
+      const exit = yield* Effect.exit(fileSystem.rename(source, target));
+      const state = yield* controls.getState;
+
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.isDie(exit.cause)).toBe(true);
+        const defect = Cause.dieOption(exit.cause);
+        expect(Option.isSome(defect)).toBe(true);
+        if (Option.isSome(defect)) {
+          expect(String(defect.value)).toContain(
+            `FileSystemServiceTest.rename is not configured for ${source} -> ${target}`,
+          );
+        }
+      }
+      expect(state.calls).toEqual([
+        {
+          operation: "rename",
+          path: `${source} -> ${target}`,
+          from: source,
+          to: target,
+        },
+      ]);
+      expect(state.exists).toEqual(new Map());
+      expect(state.mtimes).toEqual(new Map());
+      expect(state.directories).toEqual(new Map());
+      expect(state.metadata).toEqual(new Map());
+      expect(state.realPaths).toEqual(new Map());
+      expect(state.contents).toEqual(new Map());
+    }).pipe(Effect.provide(FileSystemServiceTest.layer())),
+  );
+
+  it.effect(
+    "rejects an absent rename source without replacing the destination",
+    () => {
+      const source = "/runs/missing.tmp";
+      const target = "/runs/status.json";
+
+      return Effect.gen(function* () {
+        const fileSystem = yield* FileSystemService;
+        const controls = yield* FileSystemServiceTest;
+
+        const error = yield* Effect.flip(fileSystem.rename(source, target));
+        const state = yield* controls.getState;
+
+        expect(error).toMatchObject({
+          _tag: "FileSystemError",
+          operation: "rename",
+          path: `${source} -> ${target}`,
+        });
+        expect(state.exists.get(source)).toBe(false);
+        expect(state.contents.get(target)).toBe("visible\n");
+        expect(state.metadata.get(target)).toEqual({
+          kind: "file",
+          mtimeMs: 10,
+          mode: 0o600,
+        });
+        expect(state.realPaths.get(target)).toBe(target);
+        expect(state.directories.get("/runs")).toEqual([
+          { name: "status.json", kind: "file" },
+        ]);
+      }).pipe(
+        Effect.provide(
+          FileSystemServiceTest.layer({
+            exists: new Map([[source, false]]),
+            directories: new Map([
+              ["/runs", [{ name: "status.json", kind: "file" }]],
+            ]),
+            metadata: new Map([
+              [target, { kind: "file", mtimeMs: 10, mode: 0o600 }],
+            ]),
+            realPaths: new Map([[target, target]]),
+            contents: new Map([[target, "visible\n"]]),
+          }),
+        ),
+      );
+    },
+  );
+
+  it.effect(
+    "updates fake state for writes, appends, renames, and removes",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystemService;
+
+        yield* fileSystem.writeTextFile("/runs/status.json", '{"status":1}\n', {
+          mode: 0o600,
+        });
+        expect(yield* fileSystem.readTextFile("/runs/status.json")).toBe(
+          '{"status":1}\n',
+        );
+        expect(yield* fileSystem.readDirectory("/runs")).toEqual([
+          { name: "status.json", kind: "file" },
+        ]);
+        expect(yield* fileSystem.realPath("/runs/status.json")).toBe(
+          "/runs/status.json",
+        );
+
+        yield* fileSystem.appendTextFile("/runs/status.json", "tail\n");
+        expect(yield* fileSystem.readTextFile("/runs/status.json")).toBe(
+          '{"status":1}\ntail\n',
+        );
+
+        yield* fileSystem.writeTextFile(
+          "/runs/status.old.json",
+          "stale target\n",
+          { mode: 0o600 },
+        );
+        yield* fileSystem.rename("/runs/status.json", "/runs/status.old.json");
+        expect(yield* fileSystem.exists("/runs/status.json")).toBe(false);
+        expect(yield* fileSystem.readTextFile("/runs/status.old.json")).toBe(
+          '{"status":1}\ntail\n',
+        );
+        expect(yield* fileSystem.stat("/runs/status.old.json")).toMatchObject({
+          kind: "file",
+          mode: 0o600,
+        });
+
+        yield* fileSystem.remove("/runs/status.old.json");
+        expect(yield* fileSystem.exists("/runs/status.old.json")).toBe(false);
+        expect(yield* fileSystem.readDirectory("/runs")).toEqual([]);
+      }).pipe(
+        Effect.provide(
+          FileSystemServiceTest.layer({
+            directories: new Map([["/runs", []]]),
+            metadata: new Map([
+              ["/runs", { kind: "directory", mtimeMs: 1, mode: 0o700 }],
+            ]),
+            realPaths: new Map([["/runs", "/runs"]]),
+          }),
+        ),
+      ),
+  );
+
+  it.effect("uses explicit Windows semantics for parent listings", () => {
+    const runDirectory = "C:\\runs";
+    const statusPath = win32.join(runDirectory, "status.json");
+
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystemService;
+
+      yield* fileSystem.makeDirectory(runDirectory, {
+        recursive: false,
+        mode: 0o700,
+      });
+      yield* fileSystem.writeTextFile(statusPath, "{}\n", { mode: 0o600 });
+
+      expect(yield* fileSystem.readDirectory(runDirectory)).toEqual([
+        { name: "status.json", kind: "file" },
+      ]);
+    }).pipe(
+      Effect.provide(FileSystemServiceTest.layer({ pathStyle: "win32" })),
+    );
+  });
+
+  it.effect("removes Windows descendants recursively", () => {
+    const runDirectory = "C:\\runs";
+    const nestedDirectory = win32.join(runDirectory, "nested");
+    const statusPath = win32.join(nestedDirectory, "status.json");
+
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystemService;
+
+      yield* fileSystem.makeDirectory(runDirectory, {
+        recursive: false,
+        mode: 0o700,
+      });
+      yield* fileSystem.makeDirectory(nestedDirectory, {
+        recursive: false,
+        mode: 0o700,
+      });
+      yield* fileSystem.writeTextFile(statusPath, "{}\n", { mode: 0o600 });
+
+      yield* fileSystem.remove(runDirectory, { recursive: true });
+
+      expect(yield* fileSystem.exists(runDirectory)).toBe(false);
+      expect(yield* fileSystem.exists(nestedDirectory)).toBe(false);
+      expect(yield* fileSystem.exists(statusPath)).toBe(false);
+    }).pipe(
+      Effect.provide(FileSystemServiceTest.layer({ pathStyle: "win32" })),
+    );
+  });
+
+  it.effect(
+    "requires recursive removal for directories and removes the full tree",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystemService;
+        const runDirectory = "/runs";
+        const nestedDirectory = "/runs/nested";
+        const nestedFile = "/runs/nested/status.json";
+
+        yield* fileSystem.makeDirectory(runDirectory, {
+          recursive: false,
+          mode: 0o700,
+        });
+        yield* fileSystem.makeDirectory(nestedDirectory, {
+          recursive: false,
+          mode: 0o700,
+        });
+        yield* fileSystem.writeTextFile(nestedFile, "{}\n", { mode: 0o600 });
+
+        const error = yield* Effect.flip(fileSystem.remove(runDirectory));
+
+        expect(error).toBeInstanceOf(FileSystemError);
+        expect(error).toMatchObject({
+          operation: "remove",
+          path: runDirectory,
+        });
+        expect(yield* fileSystem.readTextFile(nestedFile)).toBe("{}\n");
+
+        yield* fileSystem.remove(runDirectory, { recursive: true });
+        expect(yield* fileSystem.exists(runDirectory)).toBe(false);
+        expect(yield* fileSystem.exists(nestedDirectory)).toBe(false);
+        expect(yield* fileSystem.exists(nestedFile)).toBe(false);
+      }).pipe(Effect.provide(FileSystemServiceTest.layer())),
+  );
+
+  it.effect(
+    "returns copied directory, metadata, and real path snapshots and supports new controls",
+    () =>
+      Effect.gen(function* () {
+        const controls = yield* FileSystemServiceTest;
+
+        yield* controls.setDirectory("/agents", [
+          { name: "reader.md", kind: "file" },
+        ]);
+        yield* controls.setMetadata("/agents", {
+          kind: "directory",
+          mtimeMs: 2,
+          mode: 0o700,
+        });
+        yield* controls.setRealPath("/agents", "/real/agents");
+        yield* controls.setContent("/agents/reader.md", "content\n");
+
+        const first = yield* controls.getState;
+        const second = yield* controls.getState;
+
+        Object.assign(first.directories.get("/agents")?.[0] ?? {}, {
+          name: "writer.md",
+        });
+        Object.assign(first.metadata.get("/agents") ?? {}, {
+          kind: "other",
+          mtimeMs: 0,
+          mode: 0,
+        });
+
+        expect(first.directories).not.toBe(second.directories);
+        expect(first.metadata).not.toBe(second.metadata);
+        expect(first.realPaths).not.toBe(second.realPaths);
+        expect(second.directories.get("/agents")).toEqual([
+          { name: "reader.md", kind: "file" },
+        ]);
+        expect(second.metadata.get("/agents")).toEqual({
+          kind: "directory",
+          mtimeMs: 2,
+          mode: 0o700,
+        });
+        expect(second.realPaths.get("/agents")).toBe("/real/agents");
+      }).pipe(Effect.provide(FileSystemServiceTest.layer())),
   );
 
   it.effect("records an unconfigured operation before dying", () =>

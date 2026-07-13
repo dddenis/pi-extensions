@@ -16,7 +16,11 @@ export { FileSystemServiceTest } from "./file-system";
 export type {
   FileSystemServiceTestCall,
   FileSystemServiceTestConfig,
+  FileSystemServiceTestDirectories,
   FileSystemServiceTestFailures,
+  FileSystemServiceTestMetadata,
+  FileSystemServiceTestPathStyle,
+  FileSystemServiceTestRealPaths,
   FileSystemServiceTestService,
   FileSystemServiceTestState,
 } from "./file-system";
@@ -37,6 +41,8 @@ export type {
 export { ProcessServiceTest } from "./process";
 export type {
   ProcessServiceTestCall,
+  ProcessServiceTestConfig,
+  ProcessServiceTestProcessState,
   ProcessServiceTestService,
   ProcessServiceTestState,
 } from "./process";
