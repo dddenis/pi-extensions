@@ -27,14 +27,13 @@ const manifest = {
     cwd: "/repo",
   },
   agent: {
-    name: "reviewer",
+    name: "alpha",
     description: "Inspect contracts",
     model: "provider/model",
     thinking: "medium",
     tools: ["read", "grep"],
-    writer: false,
-    providerExtensions: ["/ext/reviewer.ts"],
-    definitionPath: "/agents/reviewer.md",
+    providerExtensions: ["/ext/alpha.ts"],
+    definitionPath: "/agents/alpha.md",
   },
   artifacts: {
     runId: "run-1",
@@ -51,9 +50,9 @@ const manifest = {
 describe("subagent schemas", () => {
   it("accepts a single trimmed task", () => {
     expect(
-      decodeTasks({ tasks: [{ agent: " reviewer ", task: " inspect " }] }),
+      decodeTasks({ tasks: [{ agent: " alpha ", task: " inspect " }] }),
     ).toEqual({
-      tasks: [{ agent: "reviewer", task: "inspect" }],
+      tasks: [{ agent: "alpha", task: "inspect" }],
     });
   });
 
@@ -61,16 +60,16 @@ describe("subagent schemas", () => {
     expect(
       decodeTasks({
         tasks: [
-          { agent: "reviewer", task: "inspect" },
-          { agent: "reader", task: "collect evidence", cwd: " /repo/docs " },
-          { agent: "writer", task: "draft changes" },
+          { agent: "alpha", task: "inspect" },
+          { agent: "beta", task: "collect evidence", cwd: " /repo/docs " },
+          { agent: "gamma", task: "draft changes" },
         ],
       }),
     ).toEqual({
       tasks: [
-        { agent: "reviewer", task: "inspect" },
-        { agent: "reader", task: "collect evidence", cwd: "/repo/docs" },
-        { agent: "writer", task: "draft changes" },
+        { agent: "alpha", task: "inspect" },
+        { agent: "beta", task: "collect evidence", cwd: "/repo/docs" },
+        { agent: "gamma", task: "draft changes" },
       ],
     });
   });
@@ -94,33 +93,31 @@ describe("subagent schemas", () => {
       decodeTasks({ tasks: [{ agent: "   ", task: "inspect" }] }),
     ).toThrow();
     expect(() =>
-      decodeTasks({ tasks: [{ agent: "reviewer", task: "   " }] }),
+      decodeTasks({ tasks: [{ agent: "alpha", task: "   " }] }),
     ).toThrow();
   });
 
-  it("accepts valid frontmatter and preserves optional absence", () => {
+  it("accepts the supported frontmatter and preserves optional absence", () => {
     expect(
       decodeAgentFrontmatter({
-        name: " reviewer ",
+        name: " alpha ",
         description: " inspect contracts ",
         model: " provider/model ",
         thinking: "medium",
         tools: " read, grep ",
-        writer: false,
       }),
     ).toEqual({
-      name: "reviewer",
+      name: "alpha",
       description: "inspect contracts",
       model: "provider/model",
       thinking: "medium",
       tools: ["read", "grep"],
-      writer: false,
     });
 
     expect(
       Object.prototype.hasOwnProperty.call(
         decodeAgentFrontmatter({
-          name: "reader",
+          name: "beta",
           description: "Inspect only",
         }),
         "tools",
@@ -128,50 +125,53 @@ describe("subagent schemas", () => {
     ).toBe(false);
   });
 
+  it("rejects mutation classification as unknown frontmatter", () => {
+    expect(() =>
+      decodeAgentFrontmatter({
+        name: "alpha",
+        description: "Inspect contracts",
+        writer: false,
+      }),
+    ).toThrow();
+  });
+
   it("rejects multiline or unknown frontmatter fields", () => {
     expect(() =>
-      decodeAgentFrontmatter({ name: "reader\nwriter", description: "bad" }),
+      decodeAgentFrontmatter({ name: "alpha\nbeta", description: "bad" }),
     ).toThrow();
     expect(() =>
       decodeAgentFrontmatter({
-        name: "reader",
+        name: "alpha",
         description: "bad\nidea",
       }),
     ).toThrow();
     expect(() =>
       decodeAgentFrontmatter({
-        name: "reader",
+        name: "alpha",
         description: "Inspect",
         extra: true,
       }),
     ).toThrow();
   });
 
-  it("rejects invalid frontmatter thinking, writer, and tools", () => {
+  it("rejects invalid frontmatter thinking and tools", () => {
     expect(() =>
       decodeAgentFrontmatter({
-        name: "reader",
+        name: "alpha",
         description: "Inspect",
         thinking: "turbo",
       }),
     ).toThrow();
     expect(() =>
       decodeAgentFrontmatter({
-        name: "reader",
-        description: "Inspect",
-        writer: "false",
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeAgentFrontmatter({
-        name: "reader",
+        name: "alpha",
         description: "Inspect",
         tools: "   ",
       }),
     ).toThrow();
     expect(() =>
       decodeAgentFrontmatter({
-        name: "reader",
+        name: "alpha",
         description: "Inspect",
         tools: "read, grep, read",
       }),
@@ -230,9 +230,15 @@ describe("subagent schemas", () => {
     }
   });
 
-  it("accepts valid manifest and status records", () => {
+  it("accepts manifests without mutation classification", () => {
     expect(decodeRunManifest(manifest)).toEqual(manifest);
     expect(decodeRunManifestJson(JSON.stringify(manifest))).toEqual(manifest);
+    expect(() =>
+      decodeRunManifest({
+        ...manifest,
+        agent: { ...manifest.agent, writer: false },
+      }),
+    ).toThrow();
 
     expect(
       decodeRunStatusRecord({
@@ -287,7 +293,7 @@ describe("subagent schemas", () => {
     expect(
       decodeRunResult({
         runId: "run-1",
-        agent: "reviewer",
+        agent: "alpha",
         status: "DONE",
         summary: "Completed review",
         reportPath: "/tmp/report.md",
@@ -306,7 +312,7 @@ describe("subagent schemas", () => {
       }),
     ).toEqual({
       runId: "run-1",
-      agent: "reviewer",
+      agent: "alpha",
       status: "DONE",
       summary: "Completed review",
       reportPath: "/tmp/report.md",

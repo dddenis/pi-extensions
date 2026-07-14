@@ -93,10 +93,7 @@ const nestedDelegationPrompt =
   "Do not launch subagents or delegate this task. Complete it yourself.";
 const structuredCompletionPrompt =
   "Before finishing, call complete_subagent exactly once as your sole final tool call. Use status DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED; provide a concise single-line summary; and provide an absolute reportPath when a report is required.";
-const allowedRolePrompts = [
-  "Read and report without modifying files.",
-  "Implement the requested change.",
-];
+const allowedRolePrompts = ["Handle the delegated task and report the result."];
 const promptValidated = allowedRolePrompts.some(
   (rolePrompt) =>
     systemPromptText ===

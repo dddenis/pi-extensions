@@ -26,10 +26,10 @@ describe("ChildProgress projection", () => {
 
   it.effect("tracks run identity, lifecycle, and aggregate usage", () =>
     Effect.gen(function* () {
-      const progress = makeChildProgress("run-1", "reviewer");
+      const progress = makeChildProgress("run-1", "alpha");
       expect(progress.snapshot).toEqual({
         runId: "run-1",
-        agent: "reviewer",
+        agent: "alpha",
         lifecycle: "STARTING",
         items: [],
         usage: zeroUsage,
@@ -65,7 +65,7 @@ describe("ChildProgress projection", () => {
 
   it.effect("truncates assistant previews by Unicode code points", () =>
     Effect.gen(function* () {
-      const progress = makeChildProgress("run-1", "reader");
+      const progress = makeChildProgress("run-1", "beta");
       const text = `${"😀".repeat(MAX_ASSISTANT_PREVIEW)}tail`;
       yield* progress.update({ type: "assistant", text });
 
@@ -84,7 +84,7 @@ describe("ChildProgress projection", () => {
     "replaces arbitrary tool previews with a non-sensitive summary",
     () =>
       Effect.gen(function* () {
-        const progress = makeChildProgress("run-1", "reader");
+        const progress = makeChildProgress("run-1", "beta");
         yield* progress.update({
           type: "tool",
           name: "read",
@@ -104,7 +104,7 @@ describe("ChildProgress projection", () => {
 
   it.effect("retains only the latest twelve bounded items", () =>
     Effect.gen(function* () {
-      const progress = makeChildProgress("run-1", "reader");
+      const progress = makeChildProgress("run-1", "beta");
       for (let index = 0; index < MAX_PROGRESS_ITEMS + 3; index += 1) {
         yield* progress.update({ type: "assistant", text: `item-${index}` });
       }
@@ -121,7 +121,7 @@ describe("ChildProgress projection", () => {
 
   it.effect("copies item arrays and usage objects on every snapshot", () =>
     Effect.gen(function* () {
-      const progress = makeChildProgress("run-1", "reader");
+      const progress = makeChildProgress("run-1", "beta");
       yield* progress.update({ type: "assistant", text: "working" });
 
       const first = progress.snapshot;
@@ -138,7 +138,7 @@ describe("ChildProgress projection", () => {
     "does not retain ignored raw JSON or text beyond preview bounds",
     () =>
       Effect.gen(function* () {
-        const progress = makeChildProgress("run-1", "reader");
+        const progress = makeChildProgress("run-1", "beta");
         yield* progress.update({ type: "ignored" });
         yield* progress.update({
           type: "tool",
@@ -155,7 +155,7 @@ describe("ChildProgress projection", () => {
 
   it.effect("allows the executor to project an explicit lifecycle", () =>
     Effect.gen(function* () {
-      const progress = makeChildProgress("run-1", "reader");
+      const progress = makeChildProgress("run-1", "beta");
       yield* progress.setLifecycle("RUNNING");
       expect(progress.snapshot.lifecycle).toBe("RUNNING");
     }),

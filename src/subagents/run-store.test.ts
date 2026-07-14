@@ -26,15 +26,14 @@ const resolvedTask = (task = "Inspect the secret contract."): ResolvedTask =>
     task,
     cwd: "/repo",
     agent: Object.freeze({
-      name: "reviewer",
-      description: "Review contracts",
-      rolePrompt: "Act as a careful contract reviewer.",
+      name: "alpha",
+      description: "Handle delegated work",
+      rolePrompt: "Act as a careful delegated agent.",
       model: "openai-codex/gpt-5.4",
       thinking: "high",
       tools: Object.freeze(["read", "grep"]),
-      writer: false,
       providerExtensions: Object.freeze(["/extensions/search.ts"]),
-      definitionPath: "/agents/reviewer.md",
+      definitionPath: "/agents/alpha.md",
     }),
   });
 
@@ -161,31 +160,39 @@ describe("RunStore", () => {
             run.artifacts.manifestPath,
           );
           expect(manifestRaw.endsWith("\n")).toBe(true);
-          expect(decodeRunManifestJson(manifestRaw)).toEqual({
+          const persistedManifest = decodeRunManifestJson(manifestRaw);
+          expect(persistedManifest).toEqual({
             runId,
             createdAt,
             task: { index: 1, cwd: "/repo" },
             agent: {
-              name: "reviewer",
-              description: "Review contracts",
+              name: "alpha",
+              description: "Handle delegated work",
               model: "openai-codex/gpt-5.4",
               thinking: "high",
               tools: ["read", "grep"],
-              writer: false,
               providerExtensions: ["/extensions/search.ts"],
-              definitionPath: "/agents/reviewer.md",
+              definitionPath: "/agents/alpha.md",
             },
             artifacts: run.artifacts,
           });
-          expect(Object.isFrozen(decodeRunManifestJson(manifestRaw))).toBe(
-            true,
-          );
+          expect(persistedManifest.agent).toEqual({
+            name: "alpha",
+            description: "Handle delegated work",
+            model: "openai-codex/gpt-5.4",
+            thinking: "high",
+            tools: ["read", "grep"],
+            providerExtensions: ["/extensions/search.ts"],
+            definitionPath: "/agents/alpha.md",
+          });
+          expect(persistedManifest.agent).not.toHaveProperty("writer");
+          expect(Object.isFrozen(persistedManifest)).toBe(true);
 
           expect(yield* fileSystem.readTextFile(run.artifacts.taskPath)).toBe(
             task.task,
           );
           expect(yield* fileSystem.readTextFile(run.artifacts.systemPromptPath))
-            .toBe(`Act as a careful contract reviewer.
+            .toBe(`Act as a careful delegated agent.
 
 Do not launch subagents or delegate this task. Complete it yourself.
 

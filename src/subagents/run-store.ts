@@ -190,7 +190,6 @@ const makeManifest = (
       model: task.agent.model,
       thinking: task.agent.thinking,
       ...(task.agent.tools === undefined ? {} : { tools: task.agent.tools }),
-      writer: task.agent.writer,
       providerExtensions: task.agent.providerExtensions,
       definitionPath: task.agent.definitionPath,
     },

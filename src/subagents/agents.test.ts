@@ -18,7 +18,6 @@ const definition = (
     readonly model?: string;
     readonly thinking?: string;
     readonly tools?: string;
-    readonly writer?: boolean;
     readonly body?: string;
   } = {},
 ): string => `---
@@ -27,7 +26,7 @@ description: ${options.description ?? `The ${name} agent`}${
   options.model === undefined ? "" : `\nmodel: ${options.model}`
 }${options.thinking === undefined ? "" : `\nthinking: ${options.thinking}`}${
   options.tools === undefined ? "" : `\ntools: ${options.tools}`
-}${options.writer === undefined ? "" : `\nwriter: ${options.writer}`}
+}
 ---
 ${options.body ?? `Act as ${name}.`}`;
 
@@ -44,14 +43,14 @@ describe("discoverAgents", () => {
   it.effect(
     "discovers only direct markdown regular files and freezes values",
     () => {
-      const reviewerPath = path.join(definitionsDirectory, "reviewer.md");
+      const alphaPath = path.join(definitionsDirectory, "alpha.md");
       const testLayer = layer({
         exists: new Map([[definitionsDirectory, true]]),
         directories: new Map([
           [
             definitionsDirectory,
             [
-              { name: "reviewer.md", kind: "file" },
+              { name: "alpha.md", kind: "file" },
               { name: "notes.txt", kind: "file" },
               { name: "nested.md", kind: "directory" },
               { name: "linked.md", kind: "other" },
@@ -60,12 +59,11 @@ describe("discoverAgents", () => {
         ]),
         contents: new Map([
           [
-            reviewerPath,
-            definition("reviewer", {
+            alphaPath,
+            definition("alpha", {
               model: "openai/gpt",
               thinking: "high",
               tools: "read, grep",
-              writer: false,
               body: "Review carefully.",
             }),
           ],
@@ -78,14 +76,13 @@ describe("discoverAgents", () => {
           catalog: { _tag: "Complete" },
           definitions: [
             {
-              name: "reviewer",
-              description: "The reviewer agent",
+              name: "alpha",
+              description: "The alpha agent",
               model: "openai/gpt",
               thinking: "high",
               tools: ["read", "grep"],
-              writer: false,
               rolePrompt: "Review carefully.",
-              definitionPath: reviewerPath,
+              definitionPath: alphaPath,
             },
           ],
           diagnostics: [],
@@ -99,31 +96,41 @@ describe("discoverAgents", () => {
   );
 
   it.effect(
-    "defaults omitted writer while preserving preflight inheritance fields",
+    "diagnoses removed writer frontmatter without hiding a valid neighbor",
     () => {
-      const readerPath = path.join(definitionsDirectory, "reader.md");
+      const alphaPath = path.join(definitionsDirectory, "alpha.md");
+      const legacyPath = path.join(definitionsDirectory, "legacy.md");
       const testLayer = layer({
         exists: new Map([[definitionsDirectory, true]]),
         directories: new Map([
-          [definitionsDirectory, [{ name: "reader.md", kind: "file" }]],
+          [
+            definitionsDirectory,
+            [alphaPath, legacyPath].map((filePath) => ({
+              name: path.basename(filePath),
+              kind: "file" as const,
+            })),
+          ],
         ]),
-        contents: new Map([[readerPath, definition("reader")]]),
+        contents: new Map([
+          [alphaPath, definition("alpha", { tools: "read, grep" })],
+          [
+            legacyPath,
+            "---\nname: legacy\ndescription: Legacy definition\nwriter: false\n---\nHandle the task.",
+          ],
+        ]),
       });
 
       return Effect.gen(function* () {
         const result = yield* discoverAgents;
-        expect(result.definitions).toEqual([
+        expect(result.definitions.map(({ name }) => name)).toEqual(["alpha"]);
+        expect(result.definitions[0]).not.toHaveProperty("writer");
+        expect(result.diagnostics).toEqual([
           {
-            name: "reader",
-            description: "The reader agent",
-            writer: true,
-            rolePrompt: "Act as reader.",
-            definitionPath: readerPath,
+            definitionPath: legacyPath,
+            agentName: "legacy",
+            message: expect.stringContaining("writer"),
           },
         ]);
-        expect(result.definitions[0]).not.toHaveProperty("model");
-        expect(result.definitions[0]).not.toHaveProperty("thinking");
-        expect(result.definitions[0]).not.toHaveProperty("tools");
       }).pipe(Effect.provide(testLayer));
     },
   );

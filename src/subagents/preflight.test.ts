@@ -16,12 +16,9 @@ import {
   InvalidSubagentInput,
   InvalidWorkingDirectoryError,
   ToolProviderError,
-  UnsafeReaderError,
-  WriterPolicyError,
   type SubagentError,
 } from "./errors";
 import {
-  READER_SAFE_TOOLS,
   type ModelResolutionPort,
   type ParentSnapshot,
   preflight,
@@ -45,7 +42,6 @@ const discoveredAgent = (
     readonly model?: string;
     readonly thinking?: ThinkingLevel;
     readonly tools?: ReadonlyArray<string>;
-    readonly writer?: boolean;
   } = {},
 ): DiscoveredAgent =>
   Object.freeze({
@@ -57,7 +53,6 @@ const discoveredAgent = (
     ...(options.tools === undefined
       ? {}
       : { tools: Object.freeze([...options.tools]) }),
-    writer: options.writer ?? true,
     definitionPath: `/agent/subagents/agents/${name}.md`,
   });
 
@@ -170,16 +165,15 @@ describe("preflight working directories and agents", () => {
   it.effect(
     "resolves relative cwd against parent cwd and preserves absolute cwd",
     () => {
-      const reader = discoveredAgent("reader", {
+      const alpha = discoveredAgent("alpha", {
         tools: ["read"],
-        writer: false,
       });
       return Effect.gen(function* () {
         const result = yield* run({
-          definitions: [reader],
+          definitions: [alpha],
           tasks: [
-            { agent: "reader", task: "one", cwd: "packages/app" },
-            { agent: "reader", task: "two", cwd: "/external/project" },
+            { agent: "alpha", task: "one", cwd: "packages/app" },
+            { agent: "alpha", task: "two", cwd: "/external/project" },
           ],
           metadata: new Map([
             ["/repo/packages/app", directoryMetadata],
@@ -196,11 +190,11 @@ describe("preflight working directories and agents", () => {
 
   it.effect("rejects a missing cwd or a path that is not a directory", () =>
     Effect.gen(function* () {
-      const agent = discoveredAgent("writer");
+      const agent = discoveredAgent("alpha");
       const missing = yield* Effect.either(
         run({
           definitions: [agent],
-          tasks: [{ agent: "writer", task: "write", cwd: "missing" }],
+          tasks: [{ agent: "alpha", task: "write", cwd: "missing" }],
           metadata: new Map(),
           failures: new Map([
             [
@@ -224,7 +218,7 @@ describe("preflight working directories and agents", () => {
       const file = yield* Effect.either(
         run({
           definitions: [agent],
-          tasks: [{ agent: "writer", task: "write", cwd: "/repo/file" }],
+          tasks: [{ agent: "alpha", task: "write", cwd: "/repo/file" }],
           metadata: new Map([["/repo/file", fileMetadata]]),
         }),
       );
@@ -377,12 +371,10 @@ describe("preflight model resolution", () => {
       Effect.gen(function* () {
         const inherited = discoveredAgent("inherited", {
           tools: ["read"],
-          writer: false,
         });
         const explicitThinking = discoveredAgent("deep", {
           thinking: "high",
           tools: ["read"],
-          writer: false,
         });
         const result = yield* run({
           definitions: [inherited, explicitThinking],
@@ -516,84 +508,44 @@ describe("preflight model resolution", () => {
   });
 });
 
-describe("preflight reader and writer policy", () => {
-  it.effect("accepts the exact reader-safe allowlist and one writer", () => {
-    const safeTools = [...READER_SAFE_TOOLS];
-    const tools = safeTools.map(builtin);
-    return Effect.gen(function* () {
-      const result = yield* run({
-        definitions: [
-          discoveredAgent("reader", { tools: safeTools, writer: false }),
-          discoveredAgent("writer", { tools: ["read"], writer: true }),
-        ],
-        parent: parent({ tools }),
-      });
-      expect(result.map(({ agent }) => agent.writer)).toEqual([false, true]);
-    });
-  });
-
-  it.effect("rejects readers without a nonempty explicit safe allowlist", () =>
-    Effect.gen(function* () {
-      for (const tools of [undefined, [], ["bash"], ["custom"]]) {
-        const result = yield* Effect.either(
-          run({
-            definitions: [discoveredAgent("reader", { tools, writer: false })],
-          }),
-        );
-        const error = expectFailureTag(result, "UnsafeReaderError");
-        expect(error).toBeInstanceOf(UnsafeReaderError);
-      }
-    }),
-  );
-
+describe("preflight uniform tool policy", () => {
   it.effect(
-    "allows writer agents to request bash, custom, and unknown tool names when provenance exists",
+    "resolves one to three tasks regardless of mutation-capable tools",
     () => {
-      const requested = ["bash", "custom", "unknown"];
+      const definitions = [
+        discoveredAgent("alpha"),
+        discoveredAgent("beta", { tools: ["bash"] }),
+        discoveredAgent("gamma", { tools: ["read", "edit", "write"] }),
+      ];
       return Effect.gen(function* () {
         const result = yield* run({
-          definitions: [discoveredAgent("writer", { tools: requested })],
-          parent: parent({ tools: requested.map(builtin) }),
+          definitions,
+          parent: parent({
+            tools: ["read", "bash", "edit", "write"].map(builtin),
+          }),
         });
-        expect(result[0]?.agent.tools).toEqual(requested);
-        expect(result[0]?.agent.writer).toBe(true);
+        expect(result.map(({ agent }) => agent.name)).toEqual([
+          "alpha",
+          "beta",
+          "gamma",
+        ]);
+        expect(result.map(({ agent }) => agent.tools)).toEqual([
+          undefined,
+          ["bash"],
+          ["read", "edit", "write"],
+        ]);
+        expect(result.every(({ agent }) => !("writer" in agent))).toBe(true);
       });
     },
   );
-
-  it.effect("rejects multiple writers only after resolving every task", () => {
-    let resolutions = 0;
-    const resolver = models((pattern, thinking) =>
-      Effect.sync(() => {
-        resolutions += 1;
-        return { model: pattern, thinking };
-      }),
-    );
-    return Effect.gen(function* () {
-      const result = yield* Effect.either(
-        run({
-          definitions: [
-            discoveredAgent("one", { model: "model/one" }),
-            discoveredAgent("two", { model: "model/two" }),
-          ],
-          models: resolver,
-        }),
-      );
-      const error = expectFailureTag(result, "WriterPolicyError");
-      expect(error).toBeInstanceOf(WriterPolicyError);
-      expect(resolutions).toBe(2);
-    });
-  });
 });
 
 describe("preflight tool-provider provenance", () => {
-  it.effect("loads a safe-name external override for a reader", () => {
+  it.effect("loads a safe-name external override for alpha", () => {
     const provider = "/repo/extensions/read.ts";
     return Effect.gen(function* () {
       const result = yield* run({
-        definitions: [
-          discoveredAgent("reader", { tools: ["read"], writer: false }),
-        ],
+        definitions: [discoveredAgent("alpha", { tools: ["read"] })],
         parent: parent({
           tools: [
             { name: "read", source: "extension", path: "extensions/read.ts" },
@@ -625,7 +577,7 @@ describe("preflight tool-provider provenance", () => {
         for (const tools of cases) {
           const result = yield* Effect.either(
             run({
-              definitions: [discoveredAgent("writer", { tools: ["custom"] })],
+              definitions: [discoveredAgent("beta", { tools: ["custom"] })],
               parent: parent({ tools }),
             }),
           );
@@ -649,7 +601,7 @@ describe("preflight tool-provider provenance", () => {
         ]) {
           const result = yield* Effect.either(
             run({
-              definitions: [discoveredAgent("writer", { tools: ["custom"] })],
+              definitions: [discoveredAgent("beta", { tools: ["custom"] })],
               parent: parent({
                 tools: [
                   { name: "custom", source: "extension", path: "provider.ts" },
@@ -689,7 +641,7 @@ describe("preflight tool-provider provenance", () => {
       return Effect.gen(function* () {
         const result = yield* run({
           definitions: [
-            discoveredAgent("writer", { tools: ["first", "alias", "second"] }),
+            discoveredAgent("gamma", { tools: ["first", "alias", "second"] }),
           ],
           parent: parent({
             tools: [
@@ -733,7 +685,7 @@ describe("preflight tool-provider provenance", () => {
       for (const reserved of ["complete_subagent", "subagent"]) {
         const result = yield* Effect.either(
           run({
-            definitions: [discoveredAgent("writer", { tools: [reserved] })],
+            definitions: [discoveredAgent("beta", { tools: [reserved] })],
             parent: parent({ tools: [builtin(reserved)] }),
           }),
         );
@@ -751,11 +703,9 @@ describe("preflight output", () => {
       const mutableParentTools = [builtin("read")];
       const first = discoveredAgent("first", {
         tools: mutableTools,
-        writer: false,
       });
       const second = discoveredAgent("second", {
         tools: mutableTools,
-        writer: false,
       });
       return Effect.gen(function* () {
         const result = yield* run({

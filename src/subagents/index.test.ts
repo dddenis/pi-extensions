@@ -43,7 +43,7 @@ const progress: BatchProgress = {
   children: [
     {
       runId: "run-1",
-      agent: "reviewer",
+      agent: "alpha",
       lifecycle: "RUNNING",
       items: [{ type: "assistant", text: "Checking interfaces" }],
       usage: {
@@ -60,7 +60,7 @@ const progress: BatchProgress = {
 
 const finalResult: RunResult = {
   runId: "run-1",
-  agent: "reviewer",
+  agent: "alpha",
   status: "DONE",
   summary: "Interfaces verified",
   reportPath: "/abs/report.md",
@@ -199,7 +199,7 @@ const executeContext = (
 const parentRuntimeInput = (
   signal: AbortSignal | undefined = undefined,
 ): ParentRuntimeInput => ({
-  request: { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+  request: { tasks: [{ agent: "alpha", task: "Inspect" }] },
   parent: {
     cwd: "/parent/project",
     model: "openai-codex/gpt-5.4",
@@ -296,7 +296,7 @@ describe("subagent extension adapter", () => {
 
     await harness.tool.execute(
       "call-1",
-      { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+      { tasks: [{ agent: "alpha", task: "Inspect" }] },
       signal,
       undefined,
       executeContext({ provider: "openai-codex", id: "gpt-5.4" }),
@@ -349,7 +349,7 @@ describe("subagent extension adapter", () => {
 
     await harness.tool.execute(
       "call-1",
-      { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+      { tasks: [{ agent: "alpha", task: "Inspect" }] },
       undefined,
       undefined,
       executeContext(undefined),
@@ -371,7 +371,7 @@ describe("subagent extension adapter", () => {
 
     await harness.tool.execute(
       "call-1",
-      { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+      { tasks: [{ agent: "alpha", task: "Inspect" }] },
       undefined,
       undefined,
       {
@@ -413,7 +413,7 @@ describe("subagent extension adapter", () => {
 
     const result = await harness.tool.execute(
       "call-1",
-      { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+      { tasks: [{ agent: "alpha", task: "Inspect" }] },
       undefined,
       (update) => updates.push(update),
       executeContext(undefined),
@@ -444,7 +444,7 @@ describe("subagent extension adapter", () => {
       content: [
         {
           type: "text",
-          text: "run-1 reviewer DONE: Interfaces verified (/abs/report.md)",
+          text: "run-1 alpha DONE: Interfaces verified (/abs/report.md)",
         },
       ],
       details: {
@@ -457,7 +457,7 @@ describe("subagent extension adapter", () => {
       },
     });
     expect(result.content[0]?.text).toBe(
-      "run-1 reviewer DONE: Interfaces verified (/abs/report.md)",
+      "run-1 alpha DONE: Interfaces verified (/abs/report.md)",
     );
     expect(result.details.phase).toBe("complete");
     if (result.details.phase !== "complete") return;
@@ -477,7 +477,7 @@ describe("subagent extension adapter", () => {
     await expect(
       harness.tool.execute(
         "call-1",
-        { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+        { tasks: [{ agent: "alpha", task: "Inspect" }] },
         undefined,
         undefined,
         {
@@ -498,7 +498,7 @@ describe("subagent extension adapter", () => {
 
     await harness.tool.execute(
       "call-1",
-      { tasks: [{ agent: "reviewer", task: "SECRET TASK" }] },
+      { tasks: [{ agent: "alpha", task: "SECRET TASK" }] },
       controller.signal,
       (update) => updates.push(update),
       executeContext({ provider: "openai-codex", id: "gpt-5.4" }),
@@ -526,7 +526,7 @@ describe("subagent extension adapter", () => {
     await expect(
       harness.tool.execute(
         "call-1",
-        { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+        { tasks: [{ agent: "alpha", task: "Inspect" }] },
         undefined,
         undefined,
         executeContext(undefined),
@@ -547,7 +547,7 @@ describe("subagent extension adapter", () => {
     await expect(
       harness.tool.execute(
         "call-1",
-        { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+        { tasks: [{ agent: "alpha", task: "Inspect" }] },
         undefined,
         undefined,
         executeContext(undefined),
@@ -556,7 +556,7 @@ describe("subagent extension adapter", () => {
     const displayed = await harness.tool
       .execute(
         "call-2",
-        { tasks: [{ agent: "reviewer", task: "Inspect" }] },
+        { tasks: [{ agent: "alpha", task: "Inspect" }] },
         undefined,
         undefined,
         executeContext(undefined),

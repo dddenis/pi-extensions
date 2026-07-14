@@ -12,7 +12,7 @@
 
 - Milestone 1 exposes one parent-facing `subagent` tool accepting a required array of one to three tasks; it does not add chains, management actions, tmux, scheduling, worktrees, automatic merging, pruning, commands, or nested delegation.
 - Definitions are rediscovered on every invocation from `<agent-dir>/subagents/agents/*.md`; project-local definitions are not supported.
-- `writer` defaults to `true`; at most one writer may appear in a batch; a reader requires an explicit allowlist containing only `read`, `grep`, `find`, `ls`, `web_search`, `fetch_content`, and `get_search_content`.
+- Every valid one-to-three-task batch may run concurrently; tool allowlists affect child availability and provider loading only, never scheduling eligibility.
 - Children start with extension discovery disabled and explicitly load only `src/subagents/index.ts` plus provider extensions required by declared external tools.
 - Child argv is always an argument array; task contents travel through `@<absolute-task.md>` and never appear directly in the process list.
 - The child environment preserves the inherited environment and adds exactly `PI_SUBAGENT_CHILD=1`.
@@ -44,7 +44,7 @@
 - Create `src/subagents/errors.ts` — tagged errors and one boundary formatter.
 - Create `src/subagents/schemas.ts` and `src/subagents/schemas.test.ts` — Effect Schema domain contracts and strict decoding tests.
 - Create `src/subagents/agents.ts` and `src/subagents/agents.test.ts` — definition discovery and duplicate exclusion.
-- Create `src/subagents/preflight.ts` and `src/subagents/preflight.test.ts` — cwd/model/thinking/tool resolution, provider provenance, writer policy, and frozen execution plans.
+- Create `src/subagents/preflight.ts` and `src/subagents/preflight.test.ts` — cwd/model/thinking/tool resolution, provider provenance, and frozen execution plans.
 - Create `src/subagents/run-store.ts` and `src/subagents/run-store.test.ts` — private artifacts, raw stream appends, atomic status transitions, and terminal immutability.
 - Create `src/subagents/completion.ts` and `src/subagents/completion.test.ts` — child completion validation and terminating tool result.
 - Create `src/subagents/pi-events.ts` and `src/subagents/pi-events.test.ts` — JSON line decoding, usage aggregation, and completion-finality state machine.
@@ -81,7 +81,6 @@ export interface ResolvedAgent {
   readonly thinking:
     "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly tools?: ReadonlyArray<string>;
-  readonly writer: boolean;
   readonly providerExtensions: ReadonlyArray<string>;
   readonly definitionPath: string;
 }
@@ -289,7 +288,7 @@ Configure and assert calls without touching disk:
 
 ```ts
 const layer = FileSystemServiceTest.layer({
-  directories: new Map([["/agents", [{ name: "reader.md", kind: "file" }]]]),
+  directories: new Map([["/agents", [{ name: "alpha.md", kind: "file" }]]]),
   metadata: new Map([
     ["/agents", { kind: "directory", mtimeMs: 1, mode: 0o700 }],
   ]),
@@ -299,7 +298,7 @@ const layer = FileSystemServiceTest.layer({
 const fileSystem = yield * FileSystemService;
 const controls = yield * FileSystemServiceTest;
 expect(yield * fileSystem.readDirectory("/agents")).toEqual([
-  { name: "reader.md", kind: "file" },
+  { name: "alpha.md", kind: "file" },
 ]);
 yield * fileSystem.writeTextFile("/runs/status.json", "{}\n", { mode: 0o600 });
 yield * fileSystem.rename("/runs/status.json", "/runs/status.old.json");
@@ -509,22 +508,22 @@ git commit -m "feat(services): expose child launch lifecycle"
 
 - [ ] **Step 1: Write schema boundary tests**
 
-Cover one/three accepted tasks, zero/four rejected tasks, whitespace-only task/agent, multiline names/descriptions, unknown frontmatter keys, invalid `thinking`, invalid `writer`, duplicate/empty tools, completion summary length 1/500/501, relative report paths, valid status records, and malformed manifest/status JSON.
+Cover one/three accepted tasks, zero/four rejected tasks, whitespace-only task/agent, multiline names/descriptions, unknown frontmatter keys, invalid `thinking`, excess-property `writer`, duplicate/empty tools, completion summary length 1/500/501, relative report paths, valid status records, and malformed manifest/status JSON.
 
 Use exact examples:
 
 ```ts
 expect(
-  decodeTasks({ tasks: [{ agent: " reviewer ", task: " inspect " }] }),
+  decodeTasks({ tasks: [{ agent: " alpha ", task: " inspect " }] }),
 ).toEqual({
-  tasks: [{ agent: "reviewer", task: "inspect" }],
+  tasks: [{ agent: "alpha", task: "inspect" }],
 });
 expect(() => decodeTasks({ tasks: [] })).toThrow();
 expect(() =>
   decodeCompletion({ status: "DONE", summary: "x".repeat(501) }),
 ).toThrow();
 expect(() =>
-  decodeAgentFrontmatter({ name: "reader\nwriter", description: "bad" }),
+  decodeAgentFrontmatter({ name: "alpha\nbeta", description: "bad" }),
 ).toThrow();
 ```
 
@@ -568,7 +567,7 @@ export const ThinkingLevelSchema = Schema.Literal(
 );
 ```
 
-Use strict `Schema.Struct` decoding for frontmatter keys `name`, `description`, `model`, `thinking`, `tools`, and `writer`; transform trimmed single-line strings and comma-separated tools into immutable arrays. Keep `tools` absent distinct from an empty list, and reject duplicate names in one allowlist.
+Use strict `Schema.Struct` decoding for frontmatter keys `name`, `description`, `model`, `thinking`, and `tools`; transform trimmed single-line strings and comma-separated tools into immutable arrays. Keep `tools` absent distinct from an empty list, reject duplicate names in one allowlist, and require an excess-property test for `writer`.
 
 Define minimal JSON schemas for `RunManifest`, `RunStatusRecord`, `CompletionResult`, `RunUsage`, `RunResult`, and `SubagentToolDetails`; every persisted timestamp is an ISO string produced at the boundary, and every optional property stays optional rather than using unsafe casts.
 
@@ -580,10 +579,8 @@ Create these tags with structured fields rather than preformatted stacks:
 export type SubagentError =
   | InvalidSubagentInput
   | AgentDefinitionError
-  | UnsafeReaderError
   | ToolProviderError
   | InvalidWorkingDirectoryError
-  | WriterPolicyError
   | RunStoreError
   | ChildProcessError
   | PiEventStreamError
@@ -658,7 +655,7 @@ Expected: FAIL because `discoverAgents` is absent.
 
 - [ ] **Step 3: Implement discovery**
 
-Use `resolveAgentDirectoryEffect`, `readDirectory`, `readTextFile`, Pi's exported `parseFrontmatter<Record<string, unknown>>()`, and the strict Effect decoder. Default omitted `writer` to `true`, preserve omitted model/thinking/tools for preflight inheritance, and retain the absolute definition path.
+Use `resolveAgentDirectoryEffect`, `readDirectory`, `readTextFile`, Pi's exported `parseFrontmatter<Record<string, unknown>>()`, and the strict Effect decoder. Preserve only the supported fields, keep omitted model/thinking/tools available for preflight inheritance, and retain the absolute definition path without defaulting a classification.
 
 - [ ] **Step 4: Write failing preflight tests**
 
@@ -685,7 +682,7 @@ export interface PreflightInput {
 }
 ```
 
-Test relative `cwd` resolves against `parent.cwd`; absolute cwd stays absolute; both must be existing directories. Test missing agent, malformed-only agent, omitted parent model, model/thinking inheritance, explicit model-pattern resolution, resolver warnings/errors, safe reader allowlists, safe-name external overrides, unknown/custom/bash tools, one writer plus readers, multiple writers, missing/SDK/synthetic/duplicate provider entries, provider path deduplication, reserved `complete_subagent`, reserved `subagent`, and stable request order.
+Test relative `cwd` resolves against `parent.cwd`; absolute cwd stays absolute; both must be existing directories. Test missing agent, malformed-only agent, omitted parent model, model/thinking inheritance, explicit model-pattern resolution, resolver warnings/errors, omitted and mutation-capable allowlists, unknown/custom/bash tools, missing/SDK/synthetic/duplicate provider entries, non-file provider paths, provider path deduplication, reserved `complete_subagent`, reserved `subagent`, and three accepted tasks in stable request order.
 
 - [ ] **Step 5: Run preflight tests and verify RED**
 
@@ -697,35 +694,15 @@ bun --bun vitest run src/subagents/preflight.test.ts --reporter dot
 
 Expected: FAIL because preflight behavior is absent.
 
-- [ ] **Step 6: Implement reader classification and provenance resolution**
+- [ ] **Step 6: Implement provider-only tool resolution**
 
-Use this constant and rule exactly:
+Use declared tool allowlists as execution configuration only. Reject reserved `complete_subagent` and `subagent`, group the provided snapshot by requested name, require one entry per declared tool, accept `source === "builtin"` without an extension, reject `source === "sdk"` and angle-bracket synthetic paths, resolve relative paths against `baseDir` when present and otherwise against parent cwd, require the resulting path to be an existing regular file, and deduplicate canonical real paths in first-use order.
 
-```ts
-export const READER_SAFE_TOOLS = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "web_search",
-  "fetch_content",
-  "get_search_content",
-]);
-
-const readerSafe =
-  definition.writer === false &&
-  definition.tools !== undefined &&
-  definition.tools.length > 0 &&
-  definition.tools.every((name) => READER_SAFE_TOOLS.has(name));
-```
-
-Reject `writer: false` when `readerSafe` is false. A safe-name tool is still classified by name for project-write safety, but if Pi provenance says it is external, resolve and load that provider extension rather than treating it as built-in.
-
-For provenance, group the provided snapshot by requested name. Require one entry; accept `source === "builtin"` without an extension; reject `source === "sdk"` and angle-bracket synthetic paths; resolve relative paths against `baseDir` when present and otherwise against parent cwd; require the resulting path to be an existing regular file. Deduplicate canonical real paths in first-use order.
+Tool allowlists determine child availability and provider loading; they do not affect scheduling eligibility.
 
 - [ ] **Step 7: Implement full preflight and no-artifact boundary**
 
-Resolve every request item first, count writers after classification, and return only after the entire array succeeds. For an explicit agent model, call `models.resolve(pattern, definition.thinking ?? parent.thinking)` and freeze its canonical `provider/id` plus resolved/clamped thinking; for an omitted model, require `parent.model` and freeze it with the explicit or inherited thinking level. The function has no `RunStore` dependency, which structurally guarantees preflight cannot create artifacts.
+Resolve every request item first, freeze the complete resolved array only after every task succeeds, and return only then. For an explicit agent model, call `models.resolve(pattern, definition.thinking ?? parent.thinking)` and freeze its canonical `provider/id` plus resolved/clamped thinking; for an omitted model, require `parent.model` and freeze it with the explicit or inherited thinking level. The function has no `RunStore` dependency, which structurally guarantees preflight cannot create artifacts.
 
 - [ ] **Step 8: Run focused discovery/preflight tests**
 
@@ -1078,11 +1055,11 @@ git commit -m "feat(subagents): add scoped run executor"
 
 - [ ] **Step 1: Write failing batch tests**
 
-Use fake discovery/store/executor ports to cover:
+Use fake discovery/store/executor ports with role-neutral names to cover:
 
 - one child;
-- three parallel readers with observed overlap;
-- one writer plus readers;
+- three unrestricted tasks with observed overlap;
+- mixed allowlists, including mutation-capable tools;
 - completion order `2, 0, 1` returning request order `0, 1, 2`;
 - mixed `DONE`, `BLOCKED`, and `FAILED` after all launch;
 - artifact failure after one run creation;
@@ -1193,8 +1170,8 @@ Test a one-child partial view, three-child partial view, final mixed statuses, e
 The model-facing final formatter is exact and ordered:
 
 ```text
-run-1 reviewer DONE: Interfaces verified
-run-2 reader BLOCKED: Missing fixture (/abs/report.md)
+run-1 alpha DONE: Interfaces verified
+run-2 beta BLOCKED: Missing fixture (/abs/report.md)
 ```
 
 - [ ] **Step 2: Implement render helpers**
@@ -1307,8 +1284,8 @@ A success stream must include one assistant message with one completion tool cal
 Cover:
 
 1. one successful child;
-2. three parallel readers with overlapping start/end timestamps;
-3. one writer with readers;
+2. three unrestricted tasks with overlapping start/end timestamps;
+3. mixed allowlists, including mutation-capable tools;
 4. mixed semantic outcomes;
 5. nonzero process failure and missing completion;
 6. rollback after partial launch failure;
@@ -1408,7 +1385,7 @@ Expected: PASS and `bun.lock` updated only as required.
 
 - [ ] **Step 4: Write the owning subagent specification**
 
-Create `docs/specs/subagents.md` under approximately 300 lines. Describe public task shape, global definition location/frontmatter, writer policy, selective loading, completion contract, artifacts/permissions, lifecycle, rollback/cancellation, ordered results, progress bounds at a behavioral level, and milestone-2 exclusions. Cross-reference process/filesystem/extension specs instead of copying implementation details.
+Create `docs/specs/subagents.md` under approximately 300 lines. Describe public task shape, global definition location/frontmatter, uniform concurrency, selective loading, completion contract, artifacts/permissions, lifecycle, rollback/cancellation, ordered results, progress bounds at a behavioral level, and milestone-2 exclusions. Cross-reference process/filesystem/extension specs instead of copying implementation details.
 
 - [ ] **Step 5: Write the filesystem service specification**
 
@@ -1495,7 +1472,7 @@ Expected: no whitespace errors, no unexpected worktree changes, and no `.context
 
 - [ ] **Step 6: Request independent code review**
 
-Use `superpowers:requesting-code-review` with three fresh read-only angles: correctness/races, tests/failure coverage, and security/privacy/spec compliance. Require file/line evidence and no edits. Resolve every blocker and every fix worth doing now with one writer, rerun the focused suite and `bun run check`, and repeat focused review if fixes materially change orchestration or storage.
+Use `superpowers:requesting-code-review` with three fresh read-only angles: correctness/races, tests/failure coverage, and security/privacy/spec compliance. Require file/line evidence and no edits. Resolve every blocker and every fix worth doing now with a single editing owner, rerun the focused suite and `bun run check`, and repeat focused review if fixes materially change orchestration or storage.
 
 - [ ] **Step 7: Commit review fixes when needed**
 

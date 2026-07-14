@@ -12,7 +12,6 @@ import { type AgentFrontmatter, decodeAgentFrontmatter } from "./schemas";
 
 export interface DiscoveredAgent extends AgentFrontmatter {
   readonly rolePrompt: string;
-  readonly writer: boolean;
   readonly definitionPath: string;
 }
 
@@ -72,7 +71,6 @@ const freezeDefinition = (
     ...(frontmatter.tools === undefined
       ? {}
       : { tools: Object.freeze([...frontmatter.tools]) }),
-    writer: frontmatter.writer ?? true,
     rolePrompt,
     definitionPath,
   });

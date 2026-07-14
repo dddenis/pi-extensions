@@ -28,8 +28,6 @@ import {
   PiEventStreamError,
   RunStoreError,
   ToolProviderError,
-  UnsafeReaderError,
-  WriterPolicyError,
   formatSubagentError,
   type SubagentError,
 } from "./errors";
@@ -231,10 +229,8 @@ export interface SubagentCompositionPorts {
 const isSubagentError = (error: unknown): error is SubagentError =>
   error instanceof InvalidSubagentInput ||
   error instanceof AgentDefinitionError ||
-  error instanceof UnsafeReaderError ||
   error instanceof ToolProviderError ||
   error instanceof InvalidWorkingDirectoryError ||
-  error instanceof WriterPolicyError ||
   error instanceof RunStoreError ||
   error instanceof ChildProcessError ||
   error instanceof PiEventStreamError ||

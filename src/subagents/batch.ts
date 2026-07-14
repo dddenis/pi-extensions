@@ -26,8 +26,6 @@ import {
   PiEventStreamError,
   RunStoreError,
   ToolProviderError,
-  UnsafeReaderError,
-  WriterPolicyError,
   formatSubagentError,
   type SubagentError,
 } from "./errors";
@@ -188,12 +186,6 @@ const withErrorMessage = (
           ? {}
           : { agentName: error.agentName }),
       });
-    case "UnsafeReaderError":
-      return new UnsafeReaderError({
-        agentName: error.agentName,
-        message,
-        ...(error.tools === undefined ? {} : { tools: error.tools }),
-      });
     case "ToolProviderError":
       return new ToolProviderError({
         toolName: error.toolName,
@@ -205,12 +197,6 @@ const withErrorMessage = (
       });
     case "InvalidWorkingDirectoryError":
       return new InvalidWorkingDirectoryError({ cwd: error.cwd, message });
-    case "WriterPolicyError":
-      return new WriterPolicyError({
-        message,
-        writerCount: error.writerCount,
-        ...(error.agents === undefined ? {} : { agents: error.agents }),
-      });
     case "RunStoreError":
       return new RunStoreError({
         operation: error.operation,

@@ -91,7 +91,11 @@ const parent = (cwd: string): ParentSnapshot => ({
   cwd,
   model: "fake-provider/fake-model",
   thinking: "off",
-  tools: [{ name: "read", source: "builtin", path: "<builtin>" }],
+  tools: ["read", "bash", "edit", "write"].map((name) => ({
+    name,
+    source: "builtin",
+    path: `<builtin:${name}>`,
+  })),
 });
 
 const integrationLayer = (
@@ -136,15 +140,32 @@ const writeDefinitions = (sandbox: string) =>
       recursive: true,
       mode: 0o700,
     });
-    yield* fileSystem.writeTextFile(
-      path.join(directory, "reader.md"),
-      `---\nname: reader\ndescription: Integration reader\nwriter: false\ntools: read\n---\nRead and report without modifying files.\n`,
-      { mode: 0o600 },
-    );
-    yield* fileSystem.writeTextFile(
-      path.join(directory, "writer.md"),
-      `---\nname: writer\ndescription: Integration writer\nwriter: true\ntools: read\n---\nImplement the requested change.\n`,
-      { mode: 0o600 },
+    const definitions = [
+      {
+        name: "alpha",
+        description: "Integration alpha",
+        tools: "read",
+      },
+      {
+        name: "beta",
+        description: "Integration beta",
+        tools: "bash",
+      },
+      {
+        name: "gamma",
+        description: "Integration gamma",
+        tools: "edit, write",
+      },
+    ] as const;
+    yield* Effect.forEach(
+      definitions,
+      ({ name, description, tools }) =>
+        fileSystem.writeTextFile(
+          path.join(directory, `${name}.md`),
+          `---\nname: ${name}\ndescription: ${description}\ntools: ${tools}\n---\nHandle the delegated task and report the result.\n`,
+          { mode: 0o600 },
+        ),
+      { discard: true },
     );
   });
 
@@ -568,12 +589,9 @@ const execute = (request: unknown, sandbox: string) =>
     return execution.results;
   });
 
-const task = (
-  agent: "reader" | "writer",
-  mode: string,
-  id: string,
-  delay = 80,
-) => ({
+type AgentName = "alpha" | "beta" | "gamma";
+
+const task = (agent: AgentName, mode: string, id: string, delay = 80) => ({
   agent,
   task: `${mode}\n${id}\ndelay=${delay}\n`,
 });
@@ -597,13 +615,13 @@ describe("subagents credential-free real-process integration", () => {
         Effect.gen(function* () {
           const fileSystem = yield* FileSystemService;
           const [result] = yield* execute(
-            { tasks: [task("reader", "success", "single")] },
+            { tasks: [task("alpha", "success", "single")] },
             sandbox,
           );
           expect(result).toBeDefined();
           if (result === undefined) return;
           expect(result).toMatchObject({
-            agent: "reader",
+            agent: "alpha",
             status: "DONE",
             summary: "Fake Pi completed single",
             exitCode: 0,
@@ -637,6 +655,10 @@ describe("subagents credential-free real-process integration", () => {
             result.artifacts.stderrPath,
           );
           expect(stderr).toContain("validation=passed");
+          const manifest = decodeRunManifestJson(
+            yield* fileSystem.readTextFile(result.artifacts.manifestPath),
+          );
+          expect(manifest.agent).not.toHaveProperty("writer");
           const observations = yield* waitForObservation(
             fileSystem,
             sandbox,
@@ -665,57 +687,32 @@ describe("subagents credential-free real-process integration", () => {
       ),
   );
 
-  it.effect("overlaps three parallel readers in real child processes", () =>
+  it.effect("overlaps three unrestricted agents in real child processes", () =>
     runTest((sandbox) =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystemService;
         const results = yield* execute(
           {
             tasks: [
-              task("reader", "success", "parallel-0", 240),
-              task("reader", "success", "parallel-1", 240),
-              task("reader", "success", "parallel-2", 240),
+              task("alpha", "success", "parallel-0", 240),
+              task("beta", "success", "parallel-1", 240),
+              task("gamma", "success", "parallel-2", 240),
             ],
           },
           sandbox,
         );
-        const observationSets = yield* Effect.forEach(
-          results,
-          (_result, index) =>
-            waitForObservation(fileSystem, sandbox, `parallel-${index}`, "end"),
-        );
-        assertCommonOverlap(observationSets);
-        expect(results.map((result) => result.status)).toEqual([
+        expect(results.map(({ agent }) => agent)).toEqual([
+          "alpha",
+          "beta",
+          "gamma",
+        ]);
+        expect(results.map(({ status }) => status)).toEqual([
           "DONE",
           "DONE",
           "DONE",
         ]);
-      }),
-    ),
-  );
-
-  it.effect("runs one writer concurrently with readers", () =>
-    runTest((sandbox) =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystemService;
-        const results = yield* execute(
-          {
-            tasks: [
-              task("reader", "success", "reader-0", 180),
-              task("writer", "success", "writer-1", 180),
-              task("reader", "success", "reader-2", 180),
-            ],
-          },
-          sandbox,
-        );
-        expect(results.map((result) => result.agent)).toEqual([
-          "reader",
-          "writer",
-          "reader",
-        ]);
-        expect(results.every((result) => result.status === "DONE")).toBe(true);
         const observationSets = yield* Effect.forEach(
-          ["reader-0", "writer-1", "reader-2"],
+          ["parallel-0", "parallel-1", "parallel-2"],
           (id) => waitForObservation(fileSystem, sandbox, id, "end"),
         );
         assertCommonOverlap(observationSets);
@@ -728,9 +725,9 @@ describe("subagents credential-free real-process integration", () => {
       execute(
         {
           tasks: [
-            task("reader", "success", "mixed-done"),
-            task("reader", "blocked", "mixed-blocked"),
-            task("reader", "malformed", "mixed-malformed"),
+            task("alpha", "success", "mixed-done"),
+            task("alpha", "blocked", "mixed-blocked"),
+            task("alpha", "malformed", "mixed-malformed"),
           ],
         },
         sandbox,
@@ -757,8 +754,8 @@ describe("subagents credential-free real-process integration", () => {
         execute(
           {
             tasks: [
-              task("reader", "nonzero", "exit-23"),
-              task("reader", "missing-completion", "no-completion"),
+              task("alpha", "nonzero", "exit-23"),
+              task("alpha", "missing-completion", "no-completion"),
             ],
           },
           sandbox,
@@ -793,8 +790,8 @@ describe("subagents credential-free real-process integration", () => {
               execute(
                 {
                   tasks: [
-                    task("reader", "success", "launched-first", 0),
-                    task("reader", "success", "launch-fails"),
+                    task("alpha", "success", "launched-first", 0),
+                    task("alpha", "success", "launch-fails"),
                   ],
                 },
                 sandbox,
@@ -869,8 +866,8 @@ describe("subagents credential-free real-process integration", () => {
               batch.execute(
                 {
                   tasks: [
-                    task("reader", "launch-delay", "term-exits", 5_000),
-                    task("reader", "stall", "term-stalls", 0),
+                    task("alpha", "launch-delay", "term-exits", 5_000),
+                    task("alpha", "stall", "term-stalls", 0),
                   ],
                 },
                 parent(sandbox),
@@ -954,7 +951,7 @@ describe("subagents credential-free real-process integration", () => {
           Effect.gen(function* () {
             const startedAt = Date.now();
             const [result] = yield* execute(
-              { tasks: [task("reader", "retained-output", "retained-fds", 0)] },
+              { tasks: [task("alpha", "retained-output", "retained-fds", 0)] },
               sandbox,
             );
             expect(result).toBeDefined();
@@ -975,7 +972,7 @@ describe("subagents credential-free real-process integration", () => {
       Effect.gen(function* () {
         const fileSystem = yield* FileSystemService;
         const results = yield* execute(
-          { tasks: [task("reader", "success", "stream-artifacts")] },
+          { tasks: [task("alpha", "success", "stream-artifacts")] },
           sandbox,
         );
         const result = results[0];

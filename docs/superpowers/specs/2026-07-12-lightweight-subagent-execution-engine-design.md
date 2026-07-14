@@ -20,7 +20,7 @@ Milestone 1 provides:
 - fresh Pi child processes using JSON mode;
 - live, readable progress in the parent TUI;
 - structured semantic completion;
-- parent-local writer exclusivity;
+- uniform concurrent execution for every valid one-to-three-task batch;
 - durable, user-private run artifacts; and
 - scoped cancellation with bounded child cleanup.
 
@@ -28,7 +28,6 @@ Milestone 1 does not provide:
 
 - chains, pipelines, or management actions;
 - project-local agent definitions;
-- parallel writers;
 - `/subagents` or `/subagent-kill`;
 - tmux panes, detached survival, reconnection, capacity management, or eviction;
 - scheduling, acceptance gates, worktree management, or automatic merging;
@@ -73,37 +72,23 @@ Each Markdown file contains YAML frontmatter and a non-empty role prompt. Suppor
 
 | Field         | Required | Contract                                                     |
 | ------------- | -------: | ------------------------------------------------------------ |
-| `name`        |      yes | Non-empty, trimmed, single-line public identifier            |
-| `description` |      yes | Non-empty, trimmed, single-line description                  |
-| `model`       |       no | Pi model pattern or `provider/model`                         |
+| `name`        |      yes | Trimmed, non-empty, single-line public identifier            |
+| `description` |      yes | Trimmed, non-empty, single-line description                  |
+| `model`       |       no | Pi model pattern or canonical model identifier               |
 | `thinking`    |       no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
-| `tools`       |       no | Comma-separated tool allowlist                               |
-| `writer`      |       no | Boolean; defaults to `true`                                  |
+| `tools`       |       no | Non-empty comma-separated unique tool allowlist              |
 
 Unknown fields and invalid values invalidate that definition. Definitions are rediscovered for every invocation. Malformed files are excluded without blocking unrelated valid definitions. Every definition involved in a duplicate name is excluded rather than resolved by file ordering.
 
 Model and thinking values omitted by the definition inherit the active parent session values. Pi remains responsible for clamping thinking to model capability.
 
-The resolved definition is frozen into each run manifest. Later edits cannot change an active run's prompt, model, tools, or writer classification.
+The resolved definition is frozen into each run manifest. Later edits cannot change an active run's prompt, model, thinking, tools, or provider-extension loading.
 
-## 5. Writer policy
+## 5. Uniform batch policy
 
-Writer exclusivity is intentionally parent-local. It protects runs dispatched by one parent Pi process; separate Pi sessions remain the user's responsibility.
+A valid request contains one to three tasks. Every accepted task may run concurrently, including tasks whose definitions omit a tool allowlist or declare mutation-capable tools.
 
-`writer` defaults to `true`. A definition may declare `writer: false` only when it has an explicit tool allowlist containing solely approved project-read-only tools.
-
-The initial reader-safe set is:
-
-```text
-read, grep, find, ls,
-web_search, fetch_content, get_search_content
-```
-
-`bash`, mutation tools, omitted tools, unknown tools, and other custom tools make an agent a writer. The internal completion tool does not affect classification.
-
-A batch may contain one writer alongside readers. A batch containing multiple writers is rejected. No override exists in milestone 1.
-
-The web-access tools are project-read-only rather than side-effect-free: they may perform network requests and use memory, caches, temporary downloads, or temporary clones, but they do not modify the delegated project by contract. Browser automation is not reader-safe.
+Tool allowlists are execution configuration only. They select the child's active tools and determine which external provider extensions preflight must load; they do not create a scheduling class. The batch has no mutation-based scheduling error or override.
 
 ## 6. Selective extension loading
 
@@ -183,7 +168,7 @@ The design separates:
 - agent discovery and validation;
 - run storage and status transitions;
 - external-tool provenance resolution;
-- batch preflight and writer policy; and
+- batch preflight and uniform concurrency; and
 - a host-independent `RunExecutor`.
 
 The `RunExecutor` owns command construction, process lifecycle, JSON event decoding, artifact streaming, progress events, completion validation, and terminal status commitment. It contains no parent-TUI or tmux assumptions.
@@ -200,8 +185,8 @@ For each tool call, the extension:
 
 1. decodes the one-to-three-task request;
 2. discovers agent definitions and available tool provenance;
-3. resolves each working directory, model, thinking level, tools, and writer classification;
-4. rejects unsafe readers, missing tools, multiple writers, or other preflight errors;
+3. resolves each working directory, model, thinking level, tools, and provider extensions;
+4. rejects missing, reserved, ambiguous, or non-loadable tools and other ordinary preflight failures;
 5. creates all run artifacts with `STARTING` status;
 6. launches the accepted runs with bounded concurrency;
 7. streams progress to the parent TUI;
@@ -236,10 +221,8 @@ Tagged errors distinguish at least:
 
 - invalid tool input;
 - missing, malformed, or duplicate agent definitions;
-- unsafe reader configuration;
 - unavailable or ambiguous tool providers;
 - invalid working directories;
-- writer-policy violations;
 - run-store or permission failures;
 - process launch or termination failures;
 - malformed Pi event streams; and
@@ -253,10 +236,9 @@ Tests use no model credentials or real API calls.
 
 Pure and service tests cover:
 
-- frontmatter decoding, duplicate handling, and parent inheritance;
+- strict supported frontmatter, duplicate handling, and parent inheritance;
 - one-to-three-task validation and ordered results;
-- reader-safe classification and writer rejection;
-- external-tool provenance resolution;
+- mutation-capable tool provenance, reserved-name rejection, and external-tool provenance resolution;
 - shell-free command construction;
 - JSON event decoding and bounded progress;
 - completion and report validation;
@@ -267,8 +249,7 @@ Pure and service tests cover:
 Integration tests cover:
 
 - one successful child;
-- three parallel readers;
-- one writer with readers;
+- three concurrent role-neutral tasks in one batch;
 - mixed semantic outcomes;
 - process failure and missing completion;
 - rollback after partial launch failure;

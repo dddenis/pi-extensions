@@ -117,14 +117,14 @@ describe("subagent rendering", () => {
   it("formats final model results exactly in request order", () => {
     expect(
       formatModelResult([
-        result("run-1", "reviewer", "DONE", "Interfaces verified"),
-        result("run-2", "reader", "BLOCKED", "Missing fixture", {
+        result("run-1", "alpha", "DONE", "Interfaces verified"),
+        result("run-2", "beta", "BLOCKED", "Missing fixture", {
           reportPath: "/abs/report.md",
         }),
       ]),
     ).toBe(
-      "run-1 reviewer DONE: Interfaces verified\n" +
-        "run-2 reader BLOCKED: Missing fixture (/abs/report.md)",
+      "run-1 alpha DONE: Interfaces verified\n" +
+        "run-2 beta BLOCKED: Missing fixture (/abs/report.md)",
     );
   });
 
@@ -174,7 +174,7 @@ describe("subagent rendering", () => {
         children: [
           {
             runId: `progress-${controls}`,
-            agent: `reader-${controls}`,
+            agent: `beta-${controls}`,
             lifecycle: "RUNNING",
             items: [
               { type: "assistant", text: controls },
@@ -207,7 +207,7 @@ describe("subagent rendering", () => {
       children: [
         {
           runId: "run-1",
-          agent: "reviewer",
+          agent: "alpha",
           lifecycle: "RUNNING",
           items: [
             { type: "assistant", text: "Inspecting interfaces" },
@@ -218,7 +218,7 @@ describe("subagent rendering", () => {
       ],
     });
 
-    expect(rendered).toContain("reviewer");
+    expect(rendered).toContain("alpha");
     expect(rendered).toContain("Inspecting interfaces");
     expect(rendered).toContain("read");
     expect(rendered).not.toContain('"raw"');
@@ -230,7 +230,7 @@ describe("subagent rendering", () => {
         children: [
           {
             runId: "run-1",
-            agent: "reviewer",
+            agent: "alpha",
             lifecycle: "RUNNING",
             items: [{ type: "assistant", text: "Inspecting interfaces" }],
             usage,
@@ -256,7 +256,7 @@ describe("subagent rendering", () => {
         children: [
           {
             runId: "run-1",
-            agent: "reviewer",
+            agent: "alpha",
             lifecycle: "RUNNING",
             items: [],
             usage,
@@ -274,7 +274,7 @@ describe("subagent rendering", () => {
 
   it("renders all three bounded partial children", () => {
     const rendered = renderProgress({
-      children: ["reviewer", "reader", "worker"].map((agent, index) => ({
+      children: ["alpha", "beta", "gamma"].map((agent, index) => ({
         runId: `run-${index + 1}`,
         agent,
         lifecycle: index === 0 ? "RUNNING" : "STARTING",
@@ -283,18 +283,18 @@ describe("subagent rendering", () => {
       })),
     });
 
-    expect(rendered).toContain("reviewer");
-    expect(rendered).toContain("reader");
-    expect(rendered).toContain("worker");
+    expect(rendered).toContain("alpha");
+    expect(rendered).toContain("beta");
+    expect(rendered).toContain("gamma");
   });
 
   it("renders mixed final statuses and hides details while collapsed", () => {
     const details: SubagentRenderDetails = {
       phase: "complete",
       results: [
-        result("run-1", "reviewer", "DONE", "Verified"),
-        result("run-2", "reader", "BLOCKED", "Missing fixture"),
-        result("run-3", "worker", "FAILED", "Provider failed"),
+        result("run-1", "alpha", "DONE", "Verified"),
+        result("run-2", "beta", "BLOCKED", "Missing fixture"),
+        result("run-3", "gamma", "FAILED", "Provider failed"),
       ],
       diagnostics: ["model alias warning"],
     };
@@ -325,7 +325,7 @@ describe("subagent rendering", () => {
           content: [{ type: "text", text: "ignored" }],
           details: {
             phase: "complete",
-            results: [result("run-3", "worker", "FAILED", "Provider failed")],
+            results: [result("run-3", "gamma", "FAILED", "Provider failed")],
             diagnostics: ["model alias warning"],
           } satisfies SubagentRenderDetails,
         },
@@ -350,7 +350,7 @@ describe("subagent rendering", () => {
         {
           tasks: [
             {
-              agent: "reviewer-with-a-very-long-name",
+              agent: "alpha-with-a-very-long-name",
               task: secret,
               cwd: "/a/very/long/working/directory",
             },
@@ -365,7 +365,7 @@ describe("subagent rendering", () => {
         children: [
           {
             runId: "run-with-a-long-id",
-            agent: "reviewer-with-a-very-long-name",
+            agent: "alpha-with-a-very-long-name",
             lifecycle: "RUNNING",
             items: [
               {
@@ -400,17 +400,17 @@ describe("subagent rendering", () => {
         details: {
           phase: "complete",
           results: [
-            result("run-1", "reviewer", "DONE", "Verified"),
+            result("run-1", "alpha", "DONE", "Verified"),
             result(
               "run-2",
-              "reviewer",
+              "alpha",
               "DONE_WITH_CONCERNS",
               "Verified with concerns",
             ),
-            result("run-3", "reader", "NEEDS_CONTEXT", "Need fixture"),
-            result("run-4", "reader", "BLOCKED", "Missing fixture"),
-            result("run-5", "worker", "FAILED", "Provider failed"),
-            result("run-6", "worker", "ABORTED", "Parent cancelled"),
+            result("run-3", "beta", "NEEDS_CONTEXT", "Need fixture"),
+            result("run-4", "beta", "BLOCKED", "Missing fixture"),
+            result("run-5", "gamma", "FAILED", "Provider failed"),
+            result("run-6", "gamma", "ABORTED", "Parent cancelled"),
           ],
           diagnostics: [],
         },

@@ -59,18 +59,20 @@ const emptyDiscovery: AgentDiscovery = {
   diagnostics: [],
 };
 
-const task = (index: number, writer = false): ResolvedTask => ({
+const task = (
+  index: number,
+  tools: ReadonlyArray<string> | undefined = ["read"],
+): ResolvedTask => ({
   index,
   task: `task-${index}`,
   cwd: "/repo",
   agent: {
-    name: writer ? `writer-${index}` : `reader-${index}`,
+    name: `agent-${index}`,
     description: "test agent",
     rolePrompt: "Test the requested behavior.",
     model: "openai/test",
     thinking: "medium",
-    tools: ["read"],
-    writer,
+    ...(tools === undefined ? {} : { tools }),
     providerExtensions: [],
     definitionPath: `/agents/agent-${index}.md`,
   },
@@ -400,64 +402,60 @@ describe("SubagentBatch setup and successful execution", () => {
       }),
   );
 
-  it.effect("runs three readers concurrently with observed overlap", () =>
-    Effect.gen(function* () {
-      const active = yield* Ref.make(0);
-      const maximum = yield* Ref.make(0);
-      const allStarted = yield* Deferred.make<void>();
-      const readers = [task(0), task(1), task(2)];
-      const harness = yield* makeHarness({
-        tasks: readers,
-        executor: () =>
-          Effect.succeed({
-            launch: (item) =>
-              Effect.succeed({
-                launched: Effect.void,
-                awaitResult: Ref.updateAndGet(
-                  active,
-                  (value) => value + 1,
-                ).pipe(
-                  Effect.tap((value) =>
-                    Ref.update(maximum, (current) => Math.max(current, value)),
+  it.effect(
+    "runs three unrestricted tasks concurrently with observed overlap",
+    () =>
+      Effect.gen(function* () {
+        const active = yield* Ref.make(0);
+        const maximum = yield* Ref.make(0);
+        const allStarted = yield* Deferred.make<void>();
+        const tasks = [
+          task(0, ["bash"]),
+          task(1, ["edit"]),
+          task(2, ["write"]),
+        ];
+        const harness = yield* makeHarness({
+          tasks,
+          executor: () =>
+            Effect.succeed({
+              launch: (item) =>
+                Effect.succeed({
+                  launched: Effect.void,
+                  awaitResult: Ref.updateAndGet(
+                    active,
+                    (value) => value + 1,
+                  ).pipe(
+                    Effect.tap((value) =>
+                      Ref.update(maximum, (current) =>
+                        Math.max(current, value),
+                      ),
+                    ),
+                    Effect.tap((value) =>
+                      value === 3
+                        ? Deferred.succeed(allStarted, undefined)
+                        : Effect.void,
+                    ),
+                    Effect.zipRight(Deferred.await(allStarted)),
+                    Effect.zipRight(Effect.yieldNow()),
+                    Effect.ensuring(Ref.update(active, (value) => value - 1)),
+                    Effect.as(resultFor(item)),
                   ),
-                  Effect.tap((value) =>
-                    value === 3
-                      ? Deferred.succeed(allStarted, undefined)
-                      : Effect.void,
-                  ),
-                  Effect.zipRight(Deferred.await(allStarted)),
-                  Effect.zipRight(Effect.yieldNow()),
-                  Effect.ensuring(Ref.update(active, (value) => value - 1)),
-                  Effect.as(resultFor(item)),
-                ),
-              }),
-          }),
-      });
-      const results = yield* harness.batch.execute(
-        requestFor(readers),
-        parent,
-        () => Effect.void,
-      );
-      expect(results.results).toHaveLength(3);
-      expect(yield* Ref.get(maximum)).toBe(3);
-    }),
-  );
+                }),
+            }),
+        });
 
-  it.effect("accepts one writer alongside readers", () =>
-    Effect.gen(function* () {
-      const tasks = [task(0, true), task(1), task(2)];
-      const harness = yield* makeHarness({ tasks });
-      const results = yield* harness.batch.execute(
-        requestFor(tasks),
-        parent,
-        () => Effect.void,
-      );
-      expect(results.results.map((result) => result.agent)).toEqual([
-        "writer-0",
-        "reader-1",
-        "reader-2",
-      ]);
-    }),
+        const execution = yield* harness.batch.execute(
+          requestFor(tasks),
+          parent,
+          () => Effect.void,
+        );
+        expect(execution.results.map(({ agent }) => agent)).toEqual([
+          "agent-0",
+          "agent-1",
+          "agent-2",
+        ]);
+        expect(yield* Ref.get(maximum)).toBe(3);
+      }),
   );
 
   it.effect("returns request order when completion order is 2, 0, 1", () =>
@@ -793,7 +791,7 @@ describe("SubagentBatch atomic barriers and rollback", () => {
         const decodeHarness = yield* makeHarness({ tasks: [task(0)] });
         const decodeExit = yield* Effect.exit(
           decodeHarness.batch.execute(
-            { tasks: [{ agent: "reader-0", task: "work", extra: true }] },
+            { tasks: [{ agent: "agent-0", task: "work", extra: true }] },
             parent,
             () => Effect.void,
           ),
@@ -805,7 +803,7 @@ describe("SubagentBatch atomic barriers and rollback", () => {
         const preflightHarness = yield* makeHarness({
           tasks: [task(0)],
           preflightFailure: new InvalidSubagentInput({
-            subject: "reader-0",
+            subject: "agent-0",
             field: "agent",
             message: "missing agent",
           }),
@@ -977,7 +975,7 @@ describe("SubagentBatch post-barrier independence and cancellation", () => {
           new ChildProcessError({
             operation: "wait",
             runId: "run-0",
-            agent: "reader-0",
+            agent: "agent-0",
             message: "primary wait failed",
           }),
           new RunStoreError({
@@ -989,7 +987,7 @@ describe("SubagentBatch post-barrier independence and cancellation", () => {
           new ChildProcessError({
             operation: "wait",
             runId: "run-2",
-            agent: "reader-2",
+            agent: "agent-2",
             message: "tertiary wait failed",
           }),
         ];
@@ -1025,7 +1023,7 @@ describe("SubagentBatch post-barrier independence and cancellation", () => {
         expect(outcome.left._tag).toBe("ChildProcessError");
         if (outcome.left._tag !== "ChildProcessError") return;
         expect(outcome.left.runId).toBe("run-0");
-        expect(outcome.left.agent).toBe("reader-0");
+        expect(outcome.left.agent).toBe("agent-0");
         expect(outcome.left.operation).toBe("wait");
         expect(outcome.left.message).toContain("primary wait failed");
         expect(outcome.left.message).toContain(

@@ -20,12 +20,6 @@ export class AgentDefinitionError extends Data.TaggedError(
   readonly agentName?: string;
 }> {}
 
-export class UnsafeReaderError extends Data.TaggedError("UnsafeReaderError")<{
-  readonly agentName: string;
-  readonly message: string;
-  readonly tools?: ReadonlyArray<string>;
-}> {}
-
 export class ToolProviderError extends Data.TaggedError("ToolProviderError")<{
   readonly toolName: string;
   readonly message: string;
@@ -38,12 +32,6 @@ export class InvalidWorkingDirectoryError extends Data.TaggedError(
 )<{
   readonly cwd: string;
   readonly message: string;
-}> {}
-
-export class WriterPolicyError extends Data.TaggedError("WriterPolicyError")<{
-  readonly message: string;
-  readonly writerCount: number;
-  readonly agents?: ReadonlyArray<string>;
 }> {}
 
 export class RunStoreError extends Data.TaggedError("RunStoreError")<{
@@ -81,10 +69,8 @@ export class CompletionValidationError extends Data.TaggedError(
 export type SubagentError =
   | InvalidSubagentInput
   | AgentDefinitionError
-  | UnsafeReaderError
   | ToolProviderError
   | InvalidWorkingDirectoryError
-  | WriterPolicyError
   | RunStoreError
   | ChildProcessError
   | PiEventStreamError
@@ -96,14 +82,10 @@ const primarySubject = (error: SubagentError): string | undefined => {
       return error.subject;
     case "AgentDefinitionError":
       return error.agentName ?? error.definitionPath;
-    case "UnsafeReaderError":
-      return error.agentName;
     case "ToolProviderError":
       return error.toolName;
     case "InvalidWorkingDirectoryError":
       return error.cwd;
-    case "WriterPolicyError":
-      return error.agents?.join(", ") ?? `${error.writerCount} writer(s)`;
     case "RunStoreError":
       return error.runId ?? error.path;
     case "ChildProcessError":

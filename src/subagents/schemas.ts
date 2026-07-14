@@ -179,7 +179,6 @@ export interface AgentFrontmatter {
   readonly model?: string;
   readonly thinking?: ThinkingLevel;
   readonly tools?: ReadonlyArray<string>;
-  readonly writer?: boolean;
 }
 
 export interface RunArtifacts {
@@ -204,7 +203,6 @@ export interface RunManifestAgent {
   readonly model: string;
   readonly thinking: ThinkingLevel;
   readonly tools?: ReadonlyArray<string>;
-  readonly writer: boolean;
   readonly providerExtensions: ReadonlyArray<string>;
   readonly definitionPath: string;
 }
@@ -275,7 +273,6 @@ export const AgentFrontmatterSchema = Schema.Struct({
   model: Schema.optional(NonEmptyTrimmedSingleLineStringSchema),
   thinking: Schema.optional(ThinkingLevelSchema),
   tools: Schema.optional(ToolListSchema),
-  writer: Schema.optional(Schema.Boolean),
 });
 
 const SummarySchema = Schema.transform(
@@ -287,8 +284,7 @@ const SummarySchema = Schema.transform(
   Schema.String.pipe(
     Schema.minLength(1),
     Schema.filter(
-      (value) =>
-        Array.from(value).length <= COMPLETION_SUMMARY_MAX_CODE_POINTS,
+      (value) => Array.from(value).length <= COMPLETION_SUMMARY_MAX_CODE_POINTS,
       {
         description: `text of at most ${COMPLETION_SUMMARY_MAX_CODE_POINTS} Unicode code points`,
       },
@@ -327,7 +323,6 @@ const RunManifestAgentSchema: Schema.Schema<RunManifestAgent> = Schema.Struct({
   model: NonEmptyTrimmedSingleLineStringSchema,
   thinking: ThinkingLevelSchema,
   tools: Schema.optional(Schema.Array(NonEmptyTrimmedSingleLineStringSchema)),
-  writer: Schema.Boolean,
   providerExtensions: Schema.Array(AbsolutePathSchema),
   definitionPath: AbsolutePathSchema,
 });
@@ -400,7 +395,6 @@ const freezeAgentFrontmatter = (value: AgentFrontmatter): AgentFrontmatter =>
     ...(value.model === undefined ? {} : { model: value.model }),
     ...(value.thinking === undefined ? {} : { thinking: value.thinking }),
     ...(value.tools === undefined ? {} : { tools: stringArray(value.tools) }),
-    ...(value.writer === undefined ? {} : { writer: value.writer }),
   });
 
 const freezeRunArtifacts = (value: RunArtifacts): RunArtifacts =>
@@ -428,7 +422,6 @@ const freezeRunManifestAgent = (value: RunManifestAgent): RunManifestAgent =>
     model: value.model,
     thinking: value.thinking,
     ...(value.tools === undefined ? {} : { tools: stringArray(value.tools) }),
-    writer: value.writer,
     providerExtensions: stringArray(value.providerExtensions),
     definitionPath: value.definitionPath,
   });

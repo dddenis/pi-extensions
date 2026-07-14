@@ -63,15 +63,14 @@ const resolvedTask: ResolvedTask = {
   task: "Inspect private source without exposing it.",
   cwd: "/repo",
   agent: {
-    name: "reviewer",
-    description: "Review source",
-    rolePrompt: "Review private source carefully.",
+    name: "alpha",
+    description: "Inspect source",
+    rolePrompt: "Inspect private source carefully.",
     model: "openai-codex/gpt-5.4",
     thinking: "high",
     tools: ["read"],
-    writer: false,
     providerExtensions: ["/extensions/read.ts"],
-    definitionPath: "/agents/reviewer.md",
+    definitionPath: "/agents/alpha.md",
   },
 };
 
@@ -571,7 +570,7 @@ describe("RunExecutor", () => {
           const state = yield* run.state;
           expect(result).toMatchObject({
             runId: "run-1",
-            agent: "reviewer",
+            agent: "alpha",
             status: "DONE",
             summary: "Review complete",
             reportPath: "/tmp/report.md",

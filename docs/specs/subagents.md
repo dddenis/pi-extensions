@@ -21,22 +21,14 @@ Each definition has YAML frontmatter and a non-empty Markdown role prompt. Its s
 | `model`       |       no | Pi model pattern or canonical model identifier               |
 | `thinking`    |       no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `tools`       |       no | Non-empty comma-separated unique tool allowlist              |
-| `writer`      |       no | Boolean; defaults to `true`                                  |
 
-Unknown fields, invalid values, an empty role prompt, or an unreadable file exclude that definition and produce a diagnostic without hiding valid neighbors. A missing definitions directory is empty discovery. A lookup is reported as genuinely missing only after complete discovery; directory probe/read failures report unavailable discovery, while unreadable or unparseable definitions whose names cannot be known make an otherwise absent lookup indeterminate. A requested named-invalid or duplicate definition fails with all matching definition diagnostics and paths. Every definition sharing a duplicate name is excluded. Resolved execution data is copied into the durable manifest, while the role prompt and completion requirements are preserved in the composed system-prompt artifact. Together these durable artifacts prevent later definition edits from changing an active run.
+Unknown fields, invalid values, an empty role prompt, or an unreadable file exclude that definition and produce a diagnostic without hiding valid neighbors. A missing definitions directory is empty discovery. A lookup is reported as genuinely missing only after complete discovery; directory probe/read failures report unavailable discovery, while unreadable or unparseable definitions whose names cannot be known make an otherwise absent lookup indeterminate. A requested named-invalid or duplicate definition fails with all matching definition diagnostics and paths. Every definition sharing a duplicate name is excluded. The resolved execution data copied into the durable manifest contains identity, model, thinking, tools, provider extensions, and the definition path, while the role prompt and completion requirements are preserved in the composed system-prompt artifact. Together these durable artifacts prevent later definition edits from changing an active run.
 
 An omitted model inherits the parent model. An explicit model is resolved with Pi's CLI model semantics; the resolved canonical model and Pi-adjusted thinking level are used. Thinking otherwise inherits from the parent. Resolution warnings remain visible in progress and final diagnostics, while resolution errors fail preflight.
 
-## Writer and Tool Policy
+## Tool Policy
 
-Writer exclusivity is local to one parent process and one batch. `writer` defaults to `true`, and an accepted batch may contain at most one writer alongside readers. There is no milestone-one override and no coordination between separate parent Pi sessions.
-
-A definition may set `writer: false` only with a non-empty explicit allowlist containing solely:
-
-- `read`, `grep`, `find`, and `ls`;
-- `web_search`, `fetch_content`, and `get_search_content`.
-
-These web tools are project-read-only by contract, though they may use network, cache, memory, or temporary resources. Omitted, mutation-capable, unknown, or other custom tools are not reader-safe.
+Tool allowlists control child tool availability and external provider loading; they do not classify agents or affect whether tasks may run concurrently. An omitted allowlist leaves Pi's normal child tool set available, while a declared allowlist is passed to the child together with `complete_subagent`.
 
 Children start with normal extension discovery disabled. For every declared tool, preflight requires exactly one parent-reported provider. Built-ins need no extension. SDK tools, synthetic provider paths, missing or ambiguous provenance, and non-file providers are rejected. Loadable external provider paths are canonicalized and deduplicated in first-use order. The child loads only the Subagents entrypoint and those required provider extensions; `subagent` and `complete_subagent` are reserved and cannot be requested by a definition.
 
@@ -94,4 +86,4 @@ The model-facing final text contains only run ID, agent name, terminal status, s
 
 ## Milestone-One Boundary
 
-Milestone one has no chains or pipelines, management or kill commands, tmux ownership or detached survival, reconnection, capacity scheduling, acceptance gates, worktrees, automatic merging, automatic pruning, project-local definitions, parallel writers, or nested delegation. Those milestone-two concerns must reuse rather than fork the agent, run, completion, status, and executor contracts described here.
+Milestone one has no chains or pipelines, management or kill commands, tmux ownership or detached survival, reconnection, capacity scheduling, acceptance gates, worktrees, automatic merging, automatic pruning, project-local definitions, or nested delegation. Those milestone-two concerns must reuse rather than fork the agent, run, completion, status, and executor contracts described here.

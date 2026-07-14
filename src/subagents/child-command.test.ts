@@ -9,8 +9,7 @@ import type { ResolvedTask } from "./preflight";
 import type { RunArtifacts } from "./schemas";
 
 const taskText = "Inspect the private implementation details.";
-const rolePrompt =
-  "Act as a careful reviewer of private implementation details.";
+const rolePrompt = "Act as a careful agent for private implementation details.";
 
 const resolvedTask = (
   tools: ReadonlyArray<string> | null = ["read", "web_search"],
@@ -19,18 +18,17 @@ const resolvedTask = (
   task: taskText,
   cwd: "/repo/worktree",
   agent: {
-    name: "reviewer",
-    description: "Review implementation",
+    name: "alpha",
+    description: "Inspect implementation",
     rolePrompt,
     model: "openai-codex/gpt-5.4",
     thinking: "high",
     ...(tools === null ? {} : { tools }),
-    writer: false,
     providerExtensions: [
       "/extensions/provider.ts",
       "/extensions/../extensions/provider.ts",
     ],
-    definitionPath: "/agents/reviewer.md",
+    definitionPath: "/agents/alpha.md",
   },
 });
 

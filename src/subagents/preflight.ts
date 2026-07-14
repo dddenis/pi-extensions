@@ -11,8 +11,6 @@ import {
   InvalidSubagentInput,
   InvalidWorkingDirectoryError,
   ToolProviderError,
-  UnsafeReaderError,
-  WriterPolicyError,
   type SubagentError,
 } from "./errors";
 import type {
@@ -20,16 +18,6 @@ import type {
   SubagentTaskRequest,
   ThinkingLevel,
 } from "./schemas";
-
-export const READER_SAFE_TOOLS = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "web_search",
-  "fetch_content",
-  "get_search_content",
-]);
 
 const RESERVED_TOOLS = new Set(["complete_subagent", "subagent"]);
 
@@ -40,7 +28,6 @@ export interface ResolvedAgent {
   readonly model: string;
   readonly thinking: ThinkingLevel;
   readonly tools?: ReadonlyArray<string>;
-  readonly writer: boolean;
   readonly providerExtensions: ReadonlyArray<string>;
   readonly definitionPath: string;
 }
@@ -220,29 +207,6 @@ const findDefinition = (
   );
 };
 
-const validateReader = (
-  definition: DiscoveredAgent,
-): Effect.Effect<void, UnsafeReaderError> => {
-  const readerSafe =
-    definition.writer === false &&
-    definition.tools !== undefined &&
-    definition.tools.length > 0 &&
-    definition.tools.every((name) => READER_SAFE_TOOLS.has(name));
-
-  return definition.writer === false && !readerSafe
-    ? Effect.fail(
-        new UnsafeReaderError({
-          agentName: definition.name,
-          message:
-            "Reader agents require a nonempty allowlist containing only reader-safe tools",
-          ...(definition.tools === undefined
-            ? {}
-            : { tools: Object.freeze([...definition.tools]) }),
-        }),
-      )
-    : Effect.void;
-};
-
 const resolveProviderExtensions = (
   definition: DiscoveredAgent,
   parent: ParentSnapshot,
@@ -377,7 +341,6 @@ const freezeResolvedAgent = (
     ...(definition.tools === undefined
       ? {}
       : { tools: Object.freeze([...definition.tools]) }),
-    writer: definition.writer,
     providerExtensions: Object.freeze([...providerExtensions]),
     definitionPath: definition.definitionPath,
   });
@@ -389,7 +352,6 @@ const resolveTask = (
 ): Effect.Effect<ResolvedTask, SubagentError, FileSystemService> =>
   Effect.gen(function* () {
     const definition = yield* findDefinition(task.agent, input.discovery);
-    yield* validateReader(definition);
     const cwd = yield* resolveWorkingDirectory(task.cwd, input.parent.cwd);
     const resolvedModel = yield* resolveModel(
       definition,
@@ -420,17 +382,6 @@ export const preflight = (
   SubagentError,
   FileSystemService
 > =>
-  Effect.gen(function* () {
-    const resolved = yield* Effect.forEach(input.request.tasks, (task, index) =>
-      resolveTask(task, index, input),
-    );
-    const writers = resolved.filter(({ agent }) => agent.writer);
-    if (writers.length > 1) {
-      return yield* new WriterPolicyError({
-        message: "A subagent batch may contain at most one writer",
-        writerCount: writers.length,
-        agents: Object.freeze(writers.map(({ agent }) => agent.name)),
-      });
-    }
-    return Object.freeze(resolved);
-  });
+  Effect.forEach(input.request.tasks, (task, index) =>
+    resolveTask(task, index, input),
+  ).pipe(Effect.map((resolved) => Object.freeze(resolved)));

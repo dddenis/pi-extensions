@@ -15,7 +15,7 @@ The design favors a small, explicit feature set:
 - global markdown agent definitions;
 - visible child output;
 - file-based reports and deterministic statuses;
-- writer exclusivity by default; and
+- uniform bounded concurrency for accepted one-to-three-task batches; and
 - reconnection to surviving panes after reloading or reopening parent pi.
 
 The implementation is built throughout on Effect and runs with Bun.
@@ -28,7 +28,7 @@ The implementation is built throughout on Effect and runs with Bun.
 - Keep the parent pi pane on the left and restore focus to it after spawning children.
 - Let the parent block for normal SDD dispatches while allowing children to survive parent cancellation, reload, or shutdown.
 - Return a predictable status and report reference to the parent agent.
-- Prevent accidental concurrent writers while allowing bounded parallel read-only work.
+- Keep accepted batches uniformly bounded to one to three concurrent children.
 - Keep child logs and reports inspectable without introducing a scheduler or database.
 
 ## 3. Non-goals
@@ -93,7 +93,6 @@ description: Implements one SDD task
 model: openai-codex/gpt-5.5
 thinking: xhigh
 tools: read,bash,edit,write
-writer: true
 ---
 
 You are an implementation agent. Read the supplied task brief first...
@@ -101,18 +100,17 @@ You are an implementation agent. Read the supplied task brief first...
 
 ### 6.1 Frontmatter schema
 
-| Field | Required | Meaning |
-|---|---:|---|
-| `name` | yes | Unique public agent name |
-| `description` | yes | Short description shown to the parent model |
-| `model` | no | Child pi model pattern or `provider/model` |
-| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, or `xhigh` |
-| `tools` | no | Comma-separated pi tool allowlist |
-| `writer` | no | Boolean; defaults to `false` |
+| Field         | Required | Meaning                                                      |
+| ------------- | -------: | ------------------------------------------------------------ |
+| `name`        |      yes | Trimmed, non-empty, single-line public identifier            |
+| `description` |      yes | Trimmed, non-empty, single-line description                  |
+| `model`       |       no | Pi model pattern or canonical model identifier               |
+| `thinking`    |       no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `tools`       |       no | Non-empty comma-separated unique tool allowlist              |
 
 Agent discovery happens for each invocation so definitions can be edited without restarting parent pi. Invalid files are excluded and reported with their path and validation errors; they do not prevent unrelated valid agents from running. When multiple valid files declare the same name, every conflicting definition is excluded and the duplicate is reported rather than resolved by ordering.
 
-`writer` is an explicit scheduling declaration. The extension does not attempt to infer write capability from tool names. These files are global user-owned configuration and therefore trusted.
+Tool allowlists configure child tool availability and provider loading. They do not create scheduling classes. These files are global user-owned configuration and therefore trusted.
 
 ### 6.2 Prompt composition
 
@@ -159,8 +157,7 @@ The tool supports exactly two invocation shapes.
       "task": "Inspect the affected interfaces.",
       "cwd": "/path/to/worktree"
     }
-  ],
-  "allowParallelWriters": false
+  ]
 }
 ```
 
@@ -172,11 +169,10 @@ Validation rules:
 - parallel mode accepts one to three tasks;
 - every agent must resolve to a valid global definition;
 - every supplied working directory must exist;
-- pane capacity for the complete request must be available or safely reclaimable;
-- multiple requested writers are rejected unless `allowParallelWriters` is `true`; and
-- a writer is rejected while another writer is running unless `allowParallelWriters` is `true`.
+- pane capacity for the complete request must be available or safely reclaimable; and
+- all one-to-three resolved tasks may run concurrently.
 
-One writer may run concurrently with non-writer agents. The extension prevents concurrent writers; it does not attempt to prove that readers and writers use independent working directories.
+Tool allowlists affect child availability and provider loading, not scheduling eligibility.
 
 The tool blocks until every spawned child reaches a terminal status. Parallel waits are concurrent and preserve input ordering in the returned result.
 
@@ -437,7 +433,6 @@ Tagged errors distinguish at least:
 - unavailable tmux context;
 - invalid or duplicate agent definitions;
 - invalid tool input;
-- writer-policy violation;
 - pane-capacity exhaustion;
 - unmanaged-window conflict;
 - pane command failure;
@@ -487,14 +482,13 @@ Tests require no model credentials or real API calls.
 Cover:
 
 - valid agent decoding;
-- required fields and all thinking values;
-- tools parsing and `writer: false` default;
+- required fields, supported frontmatter, and all thinking values;
+- tools parsing and duplicate/empty allowlist rejection;
 - duplicate and malformed agent rejection;
 - single versus parallel input exclusivity;
 - one-to-three parallel task bounds;
 - missing working directories;
-- writer exclusivity with and without override;
-- existing-running-writer checks;
+- role-neutral one-to-three-task concurrency, including mutation-capable allowlists;
 - capacity planning across a whole batch;
 - oldest-`DONE` eviction ordering;
 - protection of every non-`DONE` status;
@@ -517,10 +511,8 @@ Cover:
 Use test layers for filesystem, process, pane, clock, and ID services to verify:
 
 - one successful child;
-- three parallel non-writers;
-- rejection of parallel writers;
-- explicit parallel-writer override;
-- one writer alongside non-writers;
+- three concurrent role-neutral tasks;
+- mutation-capable allowlists in accepted batches;
 - failed and blocked child retention;
 - safe completed-pane eviction;
 - atomic rejection when a parallel batch cannot fit;
@@ -554,7 +546,6 @@ Tests must isolate their tmux socket and temporary home directory so they cannot
 - The extension never closes an untagged pane.
 - The extension never rearranges a window containing unrelated panes.
 - Nested delegation is disabled in child processes.
-- Parallel writers require an explicit per-call override.
 - Run logs may contain sensitive source or prompt content and should inherit user-only filesystem permissions.
 
 ## 16. SDD compatibility summary
@@ -563,12 +554,11 @@ The extension supplies the process-management primitives SDD needs without imple
 
 - fresh one-shot child per dispatch;
 - explicit model, thinking level, and tools from agent definitions;
-- implementer/writer exclusivity by default;
-- parallel read-only scouting or review up to three children;
+- parent-controlled sequencing with uniformly concurrent one-to-three-child batches;
 - durable task and report paths;
 - deterministic `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, and `BLOCKED` outcomes;
 - visible child progress;
-- parent-controlled sequencing and review loops; and
+- parent-controlled review loops; and
 - pane survival across parent pi reload or restart in the same tmux pane.
 
 This boundary keeps the extension lightweight while allowing Superpowers to remain the workflow controller.
