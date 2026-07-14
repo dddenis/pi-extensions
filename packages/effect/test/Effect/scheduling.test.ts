@@ -1,8 +1,10 @@
 import { describe, it } from "@effect/vitest"
 import { deepStrictEqual } from "@effect/vitest/utils"
 import * as Clock from "effect/Clock"
+import * as Deferred from "effect/Deferred"
 import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
+import * as Fiber from "effect/Fiber"
 import { pipe } from "effect/Function"
 import * as Ref from "effect/Ref"
 import * as Schedule from "effect/Schedule"
@@ -75,5 +77,19 @@ describe("Effect", () => {
           start: 0
         }
       ])
+    }))
+
+  it.effect("schedule - cron does not fail when the test clock is adjusted to infinity", () =>
+    Effect.gen(function*() {
+      const latch = yield* Deferred.make<void>()
+      const fiber = yield* pipe(
+        Deferred.await(latch),
+        Effect.repeat(Schedule.cron("0 0 4 8-14 * *", "UTC")),
+        Effect.fork
+      )
+
+      yield* TestClock.adjust(Infinity)
+      yield* Deferred.succeed(latch, void 0)
+      yield* Fiber.join(fiber)
     }))
 })
