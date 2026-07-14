@@ -16,8 +16,8 @@ describe("Pi package manifest", () => {
       "@earendil-works/pi-tui": "*",
     });
     expect(packageJson.devDependencies).toMatchObject({
-      "@earendil-works/pi-coding-agent": "^0.80.6",
-      "@earendil-works/pi-tui": "^0.80.6",
+      "@earendil-works/pi-coding-agent": "^0.80.7",
+      "@earendil-works/pi-tui": "^0.80.7",
     });
   });
 });
