@@ -34,6 +34,9 @@ import {
 const fixturePath = fileURLToPath(
   new URL("../../test/fixtures/fake-pi.ts", import.meta.url),
 );
+const inheritedToolProviderPath = fileURLToPath(
+  new URL("../../test/fixtures/inherited-tool-provider.ts", import.meta.url),
+);
 
 interface ExecutableSelection {
   readonly command: string;
@@ -91,7 +94,8 @@ const parent = (cwd: string): ParentSnapshot => ({
   cwd,
   model: "fake-provider/fake-model",
   thinking: "off",
-  tools: ["read", "bash", "edit", "write"].map((name) => ({
+  activeToolNames: ["read", "bash", "edit", "write"],
+  toolProviders: ["read", "bash", "edit", "write"].map((name) => ({
     name,
     source: "builtin",
     path: `<builtin:${name}>`,
@@ -141,28 +145,16 @@ const writeDefinitions = (sandbox: string) =>
       mode: 0o700,
     });
     const definitions = [
-      {
-        name: "alpha",
-        description: "Integration alpha",
-        tools: "read",
-      },
-      {
-        name: "beta",
-        description: "Integration beta",
-        tools: "bash",
-      },
-      {
-        name: "gamma",
-        description: "Integration gamma",
-        tools: "edit, write",
-      },
+      { name: "alpha", description: "Integration alpha" },
+      { name: "beta", description: "Integration beta" },
+      { name: "gamma", description: "Integration gamma" },
     ] as const;
     yield* Effect.forEach(
       definitions,
-      ({ name, description, tools }) =>
+      ({ name, description }) =>
         fileSystem.writeTextFile(
           path.join(directory, `${name}.md`),
-          `---\nname: ${name}\ndescription: ${description}\ntools: ${tools}\n---\nHandle the delegated task and report the result.\n`,
+          `---\nname: ${name}\ndescription: ${description}\n---\nHandle the delegated task and report the result.\n`,
           { mode: 0o600 },
         ),
       { discard: true },
@@ -608,6 +600,127 @@ const fastShutdown: ProcessShutdownPolicy = {
 };
 
 describe("subagents credential-free real-process integration", () => {
+  it.effect(
+    "runs builtin general with an exact safe allowlist despite unsafe active names",
+    () =>
+      runTest((sandbox) =>
+        Effect.gen(function* () {
+          const batch = yield* SubagentBatch;
+          const fileSystem = yield* FileSystemService;
+          const execution = yield* batch.execute(
+            {
+              tasks: [
+                {
+                  task: "success\ninherited-general\ndelay=20\n",
+                },
+              ],
+            },
+            {
+              cwd: sandbox,
+              model: "fake-provider/fake-model",
+              thinking: "off",
+              activeToolNames: [
+                "read",
+                "inherited_probe",
+                "subagent,inherited_probe",
+                " subagent ",
+                "sdk_bound",
+                "subagent",
+                "complete_subagent",
+              ],
+              toolProviders: [
+                {
+                  name: "read",
+                  source: "builtin",
+                  path: "<builtin:read>",
+                },
+                {
+                  name: "inherited_probe",
+                  source: "local",
+                  path: inheritedToolProviderPath,
+                },
+                {
+                  name: "subagent,inherited_probe",
+                  source: "local",
+                  path: inheritedToolProviderPath,
+                },
+                {
+                  name: " subagent ",
+                  source: "local",
+                  path: inheritedToolProviderPath,
+                },
+                {
+                  name: "sdk_bound",
+                  source: "sdk",
+                  path: "<sdk:sdk_bound>",
+                },
+              ],
+            },
+            () => Effect.void,
+          );
+
+          expect(execution.results).toHaveLength(1);
+          expect(execution.results[0]).toMatchObject({
+            agent: "general",
+            status: "DONE",
+            summary: "Fake Pi completed inherited-general",
+          });
+          expect(execution.diagnostics).toHaveLength(3);
+          expect(execution.diagnostics.join(" ")).toContain(
+            "subagent,inherited_probe",
+          );
+          expect(execution.diagnostics.join(" ")).toContain("sdk_bound");
+
+          const result = execution.results[0];
+          if (result === undefined) return;
+          const manifest = decodeRunManifestJson(
+            yield* fileSystem.readTextFile(result.artifacts.manifestPath),
+          );
+          expect(manifest.agent).toMatchObject({
+            name: "general",
+            source: "builtin",
+          });
+          expect(manifest.agent).not.toHaveProperty("definitionPath");
+          expect(manifest.toolInheritance).toEqual({
+            parentActiveToolNames: [
+              "read",
+              "inherited_probe",
+              "subagent,inherited_probe",
+              " subagent ",
+              "sdk_bound",
+              "subagent",
+              "complete_subagent",
+            ],
+            effectiveToolNames: [
+              "read",
+              "inherited_probe",
+              "complete_subagent",
+            ],
+            providerExtensions: [inheritedToolProviderPath],
+            diagnostics: [
+              expect.stringContaining("subagent,inherited_probe"),
+              expect.stringContaining("subagent"),
+              expect.stringContaining("sdk_bound"),
+            ],
+          });
+
+          const observations = yield* waitForObservation(
+            fileSystem,
+            sandbox,
+            "inherited-general",
+            "validation",
+          );
+          expect(observationFor(observations, "validation")).toMatchObject({
+            toolNames: "read,inherited_probe,complete_subagent",
+            extensionPaths: `${fixturePath},${inheritedToolProviderPath}`,
+            completionToolCount: 1,
+            subagentActive: false,
+            normalExtensionsDisabled: true,
+          });
+        }),
+      ),
+  );
+
   it.effect(
     "runs one successful child with strict completion and private artifacts",
     () =>

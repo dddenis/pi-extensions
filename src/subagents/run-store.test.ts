@@ -8,6 +8,10 @@ import { EnvironmentServiceTest } from "../../test/services/environment";
 import { FileSystemServiceTest } from "../../test/services/file-system";
 import { HomeDirectoryServiceTest } from "../../test/services/home-directory";
 import { FileSystemError, FileSystemService } from "../services/file-system";
+import {
+  GENERAL_AGENT_DESCRIPTION,
+  GENERAL_AGENT_ROLE_PROMPT,
+} from "./general-agent";
 import type { ResolvedTask } from "./preflight";
 import {
   INFRASTRUCTURE_ROLLBACK_DIAGNOSTIC,
@@ -31,9 +35,16 @@ const resolvedTask = (task = "Inspect the secret contract."): ResolvedTask =>
       rolePrompt: "Act as a careful delegated agent.",
       model: "openai-codex/gpt-5.4",
       thinking: "high",
-      tools: Object.freeze(["read", "grep"]),
-      providerExtensions: Object.freeze(["/extensions/search.ts"]),
+      source: "global",
       definitionPath: "/agents/alpha.md",
+    }),
+    toolInheritance: Object.freeze({
+      parentActiveToolNames: Object.freeze(["read", "grep", "sdk_bound"]),
+      effectiveToolNames: Object.freeze(["read", "grep", "complete_subagent"]),
+      providerExtensions: Object.freeze(["/extensions/search.ts"]),
+      diagnostics: Object.freeze([
+        'Inherited tool "sdk_bound" omitted: SDK tools cannot be recreated in a child process; source=sdk',
+      ]),
     }),
   });
 
@@ -170,9 +181,16 @@ describe("RunStore", () => {
               description: "Handle delegated work",
               model: "openai-codex/gpt-5.4",
               thinking: "high",
-              tools: ["read", "grep"],
-              providerExtensions: ["/extensions/search.ts"],
+              source: "global",
               definitionPath: "/agents/alpha.md",
+            },
+            toolInheritance: {
+              parentActiveToolNames: ["read", "grep", "sdk_bound"],
+              effectiveToolNames: ["read", "grep", "complete_subagent"],
+              providerExtensions: ["/extensions/search.ts"],
+              diagnostics: [
+                'Inherited tool "sdk_bound" omitted: SDK tools cannot be recreated in a child process; source=sdk',
+              ],
             },
             artifacts: run.artifacts,
           });
@@ -181,8 +199,7 @@ describe("RunStore", () => {
             description: "Handle delegated work",
             model: "openai-codex/gpt-5.4",
             thinking: "high",
-            tools: ["read", "grep"],
-            providerExtensions: ["/extensions/search.ts"],
+            source: "global",
             definitionPath: "/agents/alpha.md",
           });
           expect(persistedManifest.agent).not.toHaveProperty("writer");
@@ -234,7 +251,95 @@ Before finishing, call complete_subagent exactly once as your sole final tool ca
           expect(yield* fileSystem.readTextFile(run.artifacts.stderrPath)).toBe(
             "warning\npartial",
           );
-        }).pipe(Effect.provide(serviceLayer(agentDirectory, ["run-uuid"]))),
+          const generalTask: ResolvedTask = Object.freeze({
+            ...resolvedTask("Complete the delegated task."),
+            agent: Object.freeze({
+              name: "general",
+              description: GENERAL_AGENT_DESCRIPTION,
+              rolePrompt: GENERAL_AGENT_ROLE_PROMPT,
+              model: "openai-codex/gpt-5.4",
+              thinking: "high",
+              source: "builtin",
+            }),
+          });
+          const generalRun = yield* store.create(generalTask);
+          const generalManifest = decodeRunManifestJson(
+            yield* fileSystem.readTextFile(generalRun.artifacts.manifestPath),
+          );
+          expect(generalManifest.agent).toEqual({
+            name: "general",
+            description: GENERAL_AGENT_DESCRIPTION,
+            model: "openai-codex/gpt-5.4",
+            thinking: "high",
+            source: "builtin",
+          });
+          expect(generalManifest.agent).not.toHaveProperty("definitionPath");
+          expect(
+            yield* fileSystem.readTextFile(
+              generalRun.artifacts.systemPromptPath,
+            ),
+          ).toBe(`${GENERAL_AGENT_ROLE_PROMPT}
+
+Do not launch subagents or delegate this task. Complete it yourself.
+
+Before finishing, call complete_subagent exactly once as your sole final tool call. Use status DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED; provide a concise single-line summary; and provide an absolute reportPath when a report is required.
+`);
+        }).pipe(
+          Effect.provide(
+            serviceLayer(agentDirectory, ["run-uuid", "general-uuid"]),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "persists duplicate and unchanged parent active-name evidence",
+    () =>
+      withTemporaryDirectory((agentDirectory) =>
+        Effect.gen(function* () {
+          yield* TestClock.setTime(createdAtMillis);
+          const store = yield* RunStore;
+          const task = resolvedTask();
+          const parentActiveToolNames = ["read", "read", " subagent "];
+          const run = yield* store.create(
+            Object.freeze({
+              ...task,
+              toolInheritance: Object.freeze({
+                parentActiveToolNames: Object.freeze([
+                  ...parentActiveToolNames,
+                ]),
+                effectiveToolNames: Object.freeze([
+                  "read",
+                  "complete_subagent",
+                ]),
+                providerExtensions: Object.freeze([]),
+                diagnostics: Object.freeze([
+                  'Inherited tool " subagent " omitted: cannot be represented by Pi --tools as one unchanged non-empty item',
+                ]),
+              }),
+            }),
+          );
+
+          parentActiveToolNames[0] = "mutated";
+          const fileSystem = yield* FileSystemService;
+          const persisted = decodeRunManifestJson(
+            yield* fileSystem.readTextFile(run.artifacts.manifestPath),
+          );
+          expect(persisted.toolInheritance.parentActiveToolNames).toEqual([
+            "read",
+            "read",
+            " subagent ",
+          ]);
+          expect(persisted.toolInheritance.effectiveToolNames).toEqual([
+            "read",
+            "complete_subagent",
+          ]);
+          expect(
+            Object.isFrozen(persisted.toolInheritance.parentActiveToolNames),
+          ).toBe(true);
+        }).pipe(
+          Effect.provide(serviceLayer(agentDirectory, ["duplicate-run"])),
+        ),
       ),
   );
 

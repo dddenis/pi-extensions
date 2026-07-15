@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { GENERAL_AGENT_ROLE_PROMPT } from "../../src/subagents/general-agent";
 
 const args = process.argv.slice(2);
 
@@ -21,6 +22,47 @@ const requireValue = (
   value === undefined || value.length === 0
     ? rejectInvocation(code, message)
     : value;
+
+const optionValues = (name: string): ReadonlyArray<string> =>
+  args.flatMap((argument, index) =>
+    argument === name && args[index + 1] !== undefined
+      ? [args[index + 1] as string]
+      : [],
+  );
+
+const toolOptions = optionValues("--tools");
+if (toolOptions.length !== 1) {
+  rejectInvocation(
+    "tools-option-count",
+    `expected exactly one --tools, received ${toolOptions.length}`,
+  );
+}
+const activeToolNames = requireValue(
+  toolOptions[0],
+  "tools-option-value",
+  "--tools requires one value",
+)
+  .split(",")
+  .map((name) => name.trim())
+  .filter((name) => name.length > 0);
+if (
+  activeToolNames.filter((name) => name === "complete_subagent").length !== 1
+) {
+  rejectInvocation(
+    "completion-tool-count",
+    "complete_subagent must appear exactly once",
+  );
+}
+if (activeToolNames.includes("subagent")) {
+  rejectInvocation("nested-subagent-active", "subagent must be inactive");
+}
+if (!args.includes("--no-extensions")) {
+  rejectInvocation(
+    "normal-extension-discovery",
+    "--no-extensions must disable normal discovery",
+  );
+}
+const extensionPaths = optionValues("--extension");
 
 const taskReferences = args.filter((argument) => argument.startsWith("@"));
 if (taskReferences.length !== 1) {
@@ -93,7 +135,10 @@ const nestedDelegationPrompt =
   "Do not launch subagents or delegate this task. Complete it yourself.";
 const structuredCompletionPrompt =
   "Before finishing, call complete_subagent exactly once as your sole final tool call. Use status DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED; provide a concise single-line summary; and provide an absolute reportPath when a report is required.";
-const allowedRolePrompts = ["Handle the delegated task and report the result."];
+const allowedRolePrompts = [
+  "Handle the delegated task and report the result.",
+  GENERAL_AGENT_ROLE_PROMPT,
+];
 const promptValidated = allowedRolePrompts.some(
   (rolePrompt) =>
     systemPromptText ===
@@ -220,6 +265,13 @@ observe("validation", {
   promptValidated,
   directTaskBody,
   directPromptBody,
+  toolNames: activeToolNames.join(","),
+  extensionPaths: extensionPaths.join(","),
+  completionToolCount: activeToolNames.filter(
+    (name) => name === "complete_subagent",
+  ).length,
+  subagentActive: activeToolNames.includes("subagent"),
+  normalExtensionsDisabled: args.includes("--no-extensions"),
 });
 observe("ready");
 process.stderr.write(

@@ -10,33 +10,40 @@ import {
   AgentDefinitionError,
   InvalidSubagentInput,
   InvalidWorkingDirectoryError,
-  ToolProviderError,
   type SubagentError,
 } from "./errors";
 import type {
   SubagentRequest,
   SubagentTaskRequest,
   ThinkingLevel,
+  ToolInheritance,
 } from "./schemas";
+import {
+  resolveToolInheritance,
+  type ParentToolSnapshot,
+} from "./tool-inheritance";
 
-const RESERVED_TOOLS = new Set(["complete_subagent", "subagent"]);
-
-export interface ResolvedAgent {
+interface ResolvedAgentBase {
   readonly name: string;
   readonly description: string;
   readonly rolePrompt: string;
   readonly model: string;
   readonly thinking: ThinkingLevel;
-  readonly tools?: ReadonlyArray<string>;
-  readonly providerExtensions: ReadonlyArray<string>;
-  readonly definitionPath: string;
 }
+
+export type ResolvedAgent =
+  | (ResolvedAgentBase & { readonly source: "builtin" })
+  | (ResolvedAgentBase & {
+      readonly source: "global";
+      readonly definitionPath: string;
+    });
 
 export interface ResolvedTask {
   readonly index: number;
   readonly task: string;
   readonly cwd: string;
   readonly agent: ResolvedAgent;
+  readonly toolInheritance: ToolInheritance;
 }
 
 export interface ModelResolutionPort {
@@ -49,16 +56,9 @@ export interface ModelResolutionPort {
   >;
 }
 
-export interface ParentSnapshot {
-  readonly cwd: string;
+export interface ParentSnapshot extends ParentToolSnapshot {
   readonly model?: string;
   readonly thinking: ThinkingLevel;
-  readonly tools: ReadonlyArray<{
-    readonly name: string;
-    readonly source: string;
-    readonly path: string;
-    readonly baseDir?: string;
-  }>;
 }
 
 export interface PreflightInput {
@@ -67,20 +67,6 @@ export interface PreflightInput {
   readonly parent: ParentSnapshot;
   readonly models: ModelResolutionPort;
 }
-
-const providerError = (
-  toolName: string,
-  message: string,
-  details: { readonly source?: string; readonly providerPath?: string } = {},
-): ToolProviderError =>
-  new ToolProviderError({
-    toolName,
-    message,
-    ...(details.source === undefined ? {} : { source: details.source }),
-    ...(details.providerPath === undefined
-      ? {}
-      : { providerPath: details.providerPath }),
-  });
 
 const resolveWorkingDirectory = (
   requestedCwd: string | undefined,
@@ -156,6 +142,11 @@ const findDefinition = (
   DiscoveredAgent,
   InvalidSubagentInput | AgentDefinitionError
 > => {
+  const definition = discovery.definitions.find(
+    (candidate) => candidate.name === name,
+  );
+  if (definition?.source === "builtin") return Effect.succeed(definition);
+
   const namedDiagnostics = discovery.diagnostics.filter(
     (candidate) => candidate.agentName === name,
   );
@@ -169,10 +160,6 @@ const findDefinition = (
       ),
     );
   }
-
-  const definition = discovery.definitions.find(
-    (candidate) => candidate.name === name,
-  );
   if (definition !== undefined) return Effect.succeed(definition);
 
   if (discovery.catalog._tag === "Unavailable") {
@@ -207,96 +194,6 @@ const findDefinition = (
   );
 };
 
-const resolveProviderExtensions = (
-  definition: DiscoveredAgent,
-  parent: ParentSnapshot,
-): Effect.Effect<ReadonlyArray<string>, ToolProviderError, FileSystemService> =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystemService;
-    const canonicalPaths: Array<string> = [];
-    const seen = new Set<string>();
-
-    for (const toolName of definition.tools ?? []) {
-      if (RESERVED_TOOLS.has(toolName)) {
-        return yield* providerError(
-          toolName,
-          "Subagents may not declare reserved orchestration tools",
-        );
-      }
-
-      const providers = parent.tools.filter((tool) => tool.name === toolName);
-      if (providers.length !== 1) {
-        return yield* providerError(
-          toolName,
-          providers.length === 0
-            ? "Tool provider provenance is missing"
-            : "Tool provider provenance is ambiguous",
-        );
-      }
-
-      const provider = providers[0];
-      if (provider === undefined) {
-        return yield* providerError(
-          toolName,
-          "Tool provider provenance is missing",
-        );
-      }
-      if (provider.source === "builtin") continue;
-      if (provider.source === "sdk") {
-        return yield* providerError(
-          toolName,
-          "SDK tools cannot be loaded by a child",
-          {
-            source: provider.source,
-            providerPath: provider.path,
-          },
-        );
-      }
-      if (/^<.*>$/.test(provider.path)) {
-        return yield* providerError(
-          toolName,
-          "Synthetic tool provider paths cannot be loaded by a child",
-          { source: provider.source, providerPath: provider.path },
-        );
-      }
-
-      const providerPath = path.resolve(
-        provider.baseDir ?? parent.cwd,
-        provider.path,
-      );
-      const metadata = yield* fileSystem.stat(providerPath).pipe(
-        Effect.mapError((error) =>
-          providerError(toolName, error.message, {
-            source: provider.source,
-            providerPath,
-          }),
-        ),
-      );
-      if (metadata.kind !== "file") {
-        return yield* providerError(
-          toolName,
-          "External tool provider must be an existing regular file",
-          { source: provider.source, providerPath },
-        );
-      }
-
-      const canonicalPath = yield* fileSystem.realPath(providerPath).pipe(
-        Effect.mapError((error) =>
-          providerError(toolName, error.message, {
-            source: provider.source,
-            providerPath,
-          }),
-        ),
-      );
-      if (!seen.has(canonicalPath)) {
-        seen.add(canonicalPath);
-        canonicalPaths.push(canonicalPath);
-      }
-    }
-
-    return Object.freeze(canonicalPaths);
-  });
-
 const resolveModel = (
   definition: DiscoveredAgent,
   parent: ParentSnapshot,
@@ -330,25 +227,30 @@ const freezeResolvedAgent = (
   definition: DiscoveredAgent,
   model: string,
   thinking: ThinkingLevel,
-  providerExtensions: ReadonlyArray<string>,
-): ResolvedAgent =>
-  Object.freeze({
+): ResolvedAgent => {
+  const base = {
     name: definition.name,
     description: definition.description,
     rolePrompt: definition.rolePrompt,
     model,
     thinking,
-    ...(definition.tools === undefined
-      ? {}
-      : { tools: Object.freeze([...definition.tools]) }),
-    providerExtensions: Object.freeze([...providerExtensions]),
-    definitionPath: definition.definitionPath,
-  });
+  };
+  return Object.freeze(
+    definition.source === "builtin"
+      ? { ...base, source: "builtin" as const }
+      : {
+          ...base,
+          source: "global" as const,
+          definitionPath: definition.definitionPath,
+        },
+  );
+};
 
 const resolveTask = (
   task: SubagentTaskRequest,
   index: number,
   input: PreflightInput,
+  toolInheritance: ToolInheritance,
 ): Effect.Effect<ResolvedTask, SubagentError, FileSystemService> =>
   Effect.gen(function* () {
     const definition = yield* findDefinition(task.agent, input.discovery);
@@ -358,10 +260,6 @@ const resolveTask = (
       input.parent,
       input.models,
     );
-    const providerExtensions = yield* resolveProviderExtensions(
-      definition,
-      input.parent,
-    );
     return Object.freeze({
       index,
       task: task.task,
@@ -370,8 +268,8 @@ const resolveTask = (
         definition,
         resolvedModel.model,
         resolvedModel.thinking,
-        providerExtensions,
       ),
+      toolInheritance,
     });
   });
 
@@ -382,6 +280,10 @@ export const preflight = (
   SubagentError,
   FileSystemService
 > =>
-  Effect.forEach(input.request.tasks, (task, index) =>
-    resolveTask(task, index, input),
-  ).pipe(Effect.map((resolved) => Object.freeze(resolved)));
+  Effect.gen(function* () {
+    const toolInheritance = yield* resolveToolInheritance(input.parent);
+    const resolved = yield* Effect.forEach(input.request.tasks, (task, index) =>
+      resolveTask(task, index, input, toolInheritance),
+    );
+    return Object.freeze(resolved);
+  });

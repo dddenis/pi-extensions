@@ -5,17 +5,18 @@ import {
   FileSystemServiceTest,
   type FileSystemServiceTestFailures,
 } from "../../test/services/file-system";
-import { FileSystemError, type FileMetadata } from "../services/file-system";
+import { FileSystemError } from "../services/file-system";
 import type {
   AgentDefinitionDiagnostic,
   AgentDiscovery,
+  BuiltinDiscoveredAgent,
   DiscoveredAgent,
+  GlobalDiscoveredAgent,
 } from "./agents";
 import {
   AgentDefinitionError,
   InvalidSubagentInput,
   InvalidWorkingDirectoryError,
-  ToolProviderError,
   type SubagentError,
 } from "./errors";
 import {
@@ -23,7 +24,7 @@ import {
   type ParentSnapshot,
   preflight,
 } from "./preflight";
-import type { ThinkingLevel } from "./schemas";
+import { decodeTasks, type ThinkingLevel } from "./schemas";
 
 const directoryMetadata = {
   kind: "directory" as const,
@@ -36,25 +37,44 @@ const fileMetadata = {
   mode: 0o644,
 };
 
-const discoveredAgent = (
+interface DiscoveredAgentOptions {
+  readonly model?: string;
+  readonly thinking?: ThinkingLevel;
+}
+
+function discoveredAgent(
   name: string,
-  options: {
-    readonly model?: string;
-    readonly thinking?: ThinkingLevel;
-    readonly tools?: ReadonlyArray<string>;
+  options: DiscoveredAgentOptions & { readonly source: "builtin" },
+): BuiltinDiscoveredAgent;
+function discoveredAgent(
+  name: string,
+  options?: DiscoveredAgentOptions & { readonly source?: "global" },
+): GlobalDiscoveredAgent;
+function discoveredAgent(
+  name: string,
+  options: DiscoveredAgentOptions & {
+    readonly source?: "builtin" | "global";
   } = {},
-): DiscoveredAgent =>
-  Object.freeze({
+): DiscoveredAgent {
+  const source = options.source ?? "global";
+  const base = {
     name,
     description: `${name} description`,
     rolePrompt: `${name} role`,
+    source,
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.thinking === undefined ? {} : { thinking: options.thinking }),
-    ...(options.tools === undefined
-      ? {}
-      : { tools: Object.freeze([...options.tools]) }),
-    definitionPath: `/agent/subagents/agents/${name}.md`,
-  });
+  };
+  return Object.freeze(
+    source === "builtin"
+      ? { ...base, source: "builtin" as const }
+      : {
+          ...base,
+          source: "global" as const,
+          definitionPath: `/agent/subagents/agents/${name}.md`,
+        },
+  );
+}
 
 const discovery = (
   definitions: ReadonlyArray<DiscoveredAgent>,
@@ -78,7 +98,8 @@ const parent = (
     readonly cwd?: string;
     readonly model?: string | false;
     readonly thinking?: ThinkingLevel;
-    readonly tools?: ParentSnapshot["tools"];
+    readonly activeToolNames?: ReadonlyArray<string>;
+    readonly toolProviders?: ParentSnapshot["toolProviders"];
   } = {},
 ): ParentSnapshot => ({
   cwd: options.cwd ?? "/repo",
@@ -86,7 +107,8 @@ const parent = (
     ? {}
     : { model: options.model ?? "openai/parent" }),
   thinking: options.thinking ?? "medium",
-  tools: options.tools ?? [builtin("read"), builtin("grep")],
+  activeToolNames: options.activeToolNames ?? ["read", "grep"],
+  toolProviders: options.toolProviders ?? [builtin("read"), builtin("grep")],
 });
 
 const models = (
@@ -96,18 +118,18 @@ const models = (
 
 const request = (
   tasks: ReadonlyArray<{
-    readonly agent: string;
+    readonly agent?: string;
     readonly task: string;
     readonly cwd?: string;
   }>,
-) => ({ tasks });
+) => decodeTasks({ tasks });
 
 const run = (options: {
   readonly definitions: ReadonlyArray<DiscoveredAgent>;
   readonly diagnostics?: ReadonlyArray<AgentDefinitionDiagnostic>;
   readonly catalog?: AgentDiscovery["catalog"]["_tag"];
   readonly tasks?: ReadonlyArray<{
-    readonly agent: string;
+    readonly agent?: string;
     readonly task: string;
     readonly cwd?: string;
   }>;
@@ -165,9 +187,7 @@ describe("preflight working directories and agents", () => {
   it.effect(
     "resolves relative cwd against parent cwd and preserves absolute cwd",
     () => {
-      const alpha = discoveredAgent("alpha", {
-        tools: ["read"],
-      });
+      const alpha = discoveredAgent("alpha");
       return Effect.gen(function* () {
         const result = yield* run({
           definitions: [alpha],
@@ -225,6 +245,33 @@ describe("preflight working directories and agents", () => {
       const error = expectFailureTag(file, "InvalidWorkingDirectoryError");
       expect(error).toBeInstanceOf(InvalidWorkingDirectoryError);
     }),
+  );
+
+  it.effect(
+    "resolves omitted input to builtin general despite catalog failures",
+    () =>
+      Effect.gen(function* () {
+        const result = yield* run({
+          definitions: [discoveredAgent("general", { source: "builtin" })],
+          catalog: "Unavailable",
+          diagnostics: [
+            {
+              definitionPath: "/agent/subagents/agents",
+              message: "permission denied",
+            },
+            {
+              definitionPath: "/agent/subagents/agents/general.md",
+              agentName: "general",
+              message: "removed tools field",
+            },
+          ],
+          tasks: [{ task: "work" }],
+        });
+        expect(result[0]?.agent).toMatchObject({
+          name: "general",
+          source: "builtin",
+        });
+      }),
   );
 
   it.effect(
@@ -369,12 +416,9 @@ describe("preflight model resolution", () => {
     "inherits parent model and thinking while honoring explicit thinking",
     () =>
       Effect.gen(function* () {
-        const inherited = discoveredAgent("inherited", {
-          tools: ["read"],
-        });
+        const inherited = discoveredAgent("inherited");
         const explicitThinking = discoveredAgent("deep", {
           thinking: "high",
-          tools: ["read"],
         });
         const result = yield* run({
           definitions: [inherited, explicitThinking],
@@ -508,189 +552,23 @@ describe("preflight model resolution", () => {
   });
 });
 
-describe("preflight uniform tool policy", () => {
-  it.effect(
-    "resolves one to three tasks regardless of mutation-capable tools",
-    () => {
-      const definitions = [
-        discoveredAgent("alpha"),
-        discoveredAgent("beta", { tools: ["bash"] }),
-        discoveredAgent("gamma", { tools: ["read", "edit", "write"] }),
-      ];
-      return Effect.gen(function* () {
-        const result = yield* run({
-          definitions,
-          parent: parent({
-            tools: ["read", "bash", "edit", "write"].map(builtin),
-          }),
-        });
-        expect(result.map(({ agent }) => agent.name)).toEqual([
-          "alpha",
-          "beta",
-          "gamma",
-        ]);
-        expect(result.map(({ agent }) => agent.tools)).toEqual([
-          undefined,
-          ["bash"],
-          ["read", "edit", "write"],
-        ]);
-        expect(result.every(({ agent }) => !("writer" in agent))).toBe(true);
-      });
-    },
-  );
-});
-
-describe("preflight tool-provider provenance", () => {
-  it.effect("loads a safe-name external override for alpha", () => {
-    const provider = "/repo/extensions/read.ts";
-    return Effect.gen(function* () {
-      const result = yield* run({
-        definitions: [discoveredAgent("alpha", { tools: ["read"] })],
-        parent: parent({
-          tools: [
-            { name: "read", source: "extension", path: "extensions/read.ts" },
-          ],
-        }),
-        metadata: new Map<string, FileMetadata>([
-          ["/repo", directoryMetadata],
-          [provider, fileMetadata],
-        ]),
-        realPaths: new Map([[provider, provider]]),
-      });
-      expect(result[0]?.agent.providerExtensions).toEqual([provider]);
-    });
-  });
-
-  it.effect(
-    "rejects missing, SDK, synthetic, and duplicate provider entries",
-    () =>
-      Effect.gen(function* () {
-        const cases: ReadonlyArray<ParentSnapshot["tools"]> = [
-          [],
-          [{ name: "custom", source: "sdk", path: "/sdk/custom.ts" }],
-          [{ name: "custom", source: "extension", path: "<inline>" }],
-          [
-            { name: "custom", source: "builtin", path: "<builtin>" },
-            { name: "custom", source: "extension", path: "/ext/custom.ts" },
-          ],
-        ];
-        for (const tools of cases) {
-          const result = yield* Effect.either(
-            run({
-              definitions: [discoveredAgent("beta", { tools: ["custom"] })],
-              parent: parent({ tools }),
-            }),
-          );
-          const error = expectFailureTag(result, "ToolProviderError");
-          expect(error).toBeInstanceOf(ToolProviderError);
-        }
-      }),
-  );
-
-  it.effect(
-    "requires external provider paths to be existing regular files",
-    () =>
-      Effect.gen(function* () {
-        const provider = "/repo/provider.ts";
-        for (const metadata of [
-          new Map([["/repo", directoryMetadata]]),
-          new Map([
-            ["/repo", directoryMetadata],
-            [provider, directoryMetadata],
-          ]),
-        ]) {
-          const result = yield* Effect.either(
-            run({
-              definitions: [discoveredAgent("beta", { tools: ["custom"] })],
-              parent: parent({
-                tools: [
-                  { name: "custom", source: "extension", path: "provider.ts" },
-                ],
-              }),
-              metadata,
-              failures: metadata.has(provider)
-                ? undefined
-                : new Map([
-                    [
-                      "stat",
-                      new Map([
-                        [
-                          provider,
-                          new FileSystemError({
-                            operation: "stat",
-                            path: provider,
-                            message: "not found",
-                          }),
-                        ],
-                      ]),
-                    ],
-                  ]),
-            }),
-          );
-          expectFailureTag(result, "ToolProviderError");
-        }
-      }),
-  );
-
-  it.effect(
-    "resolves against baseDir and deduplicates canonical paths in first-use order",
-    () => {
-      const first = "/extensions/first.ts";
-      const alias = "/workspace/providers/alias.ts";
-      const second = "/workspace/providers/second.ts";
-      return Effect.gen(function* () {
-        const result = yield* run({
-          definitions: [
-            discoveredAgent("gamma", { tools: ["first", "alias", "second"] }),
-          ],
-          parent: parent({
-            tools: [
-              { name: "first", source: "extension", path: first },
-              {
-                name: "alias",
-                source: "extension",
-                path: "alias.ts",
-                baseDir: "/workspace/providers",
-              },
-              {
-                name: "second",
-                source: "extension",
-                path: "second.ts",
-                baseDir: "/workspace/providers",
-              },
-            ],
-          }),
-          metadata: new Map<string, FileMetadata>([
-            ["/repo", directoryMetadata],
-            [first, fileMetadata],
-            [alias, fileMetadata],
-            [second, fileMetadata],
-          ]),
-          realPaths: new Map([
-            [first, "/canonical/shared.ts"],
-            [alias, "/canonical/shared.ts"],
-            [second, "/canonical/second.ts"],
-          ]),
-        });
-        expect(result[0]?.agent.providerExtensions).toEqual([
-          "/canonical/shared.ts",
-          "/canonical/second.ts",
-        ]);
-      });
-    },
-  );
-
-  it.effect("rejects reserved complete_subagent and subagent tool names", () =>
+describe("preflight tool inheritance", () => {
+  it.effect("resolves and shares one frozen tool plan across every task", () =>
     Effect.gen(function* () {
-      for (const reserved of ["complete_subagent", "subagent"]) {
-        const result = yield* Effect.either(
-          run({
-            definitions: [discoveredAgent("beta", { tools: [reserved] })],
-            parent: parent({ tools: [builtin(reserved)] }),
-          }),
-        );
-        expectFailureTag(result, "ToolProviderError");
-      }
+      const result = yield* run({
+        definitions: [discoveredAgent("alpha"), discoveredAgent("beta")],
+        parent: parent({
+          activeToolNames: ["read"],
+          toolProviders: [builtin("read")],
+        }),
+      });
+      expect(result[0]?.toolInheritance).toBe(result[1]?.toolInheritance);
+      expect(result[0]?.toolInheritance).toEqual({
+        parentActiveToolNames: ["read"],
+        effectiveToolNames: ["read", "complete_subagent"],
+        providerExtensions: [],
+        diagnostics: [],
+      });
     }),
   );
 });
@@ -699,14 +577,8 @@ describe("preflight output", () => {
   it.effect(
     "preserves request order and deeply freezes copied execution values",
     () => {
-      const mutableTools = ["read"];
-      const mutableParentTools = [builtin("read")];
-      const first = discoveredAgent("first", {
-        tools: mutableTools,
-      });
-      const second = discoveredAgent("second", {
-        tools: mutableTools,
-      });
+      const first = discoveredAgent("first");
+      const second = discoveredAgent("second");
       return Effect.gen(function* () {
         const result = yield* run({
           definitions: [first, second],
@@ -714,7 +586,6 @@ describe("preflight output", () => {
             { agent: "second", task: "second task" },
             { agent: "first", task: "first task" },
           ],
-          parent: parent({ tools: mutableParentTools }),
         });
         expect(
           result.map(({ index, task, agent }) => [index, task, agent.name]),
@@ -725,12 +596,9 @@ describe("preflight output", () => {
         expect(Object.isFrozen(result)).toBe(true);
         expect(result.every(Object.isFrozen)).toBe(true);
         expect(result.every(({ agent }) => Object.isFrozen(agent))).toBe(true);
-        expect(result.every(({ agent }) => Object.isFrozen(agent.tools))).toBe(
-          true,
-        );
         expect(
-          result.every(({ agent }) =>
-            Object.isFrozen(agent.providerExtensions),
+          result.every(({ toolInheritance }) =>
+            Object.isFrozen(toolInheritance),
           ),
         ).toBe(true);
       });

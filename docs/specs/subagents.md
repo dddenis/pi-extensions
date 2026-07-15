@@ -2,45 +2,33 @@
 
 ## Purpose and Surface
 
-The Subagents extension runs small, isolated batches of fresh Pi child processes while preserving bounded concurrency, private durable evidence, and structured outcomes. It has one package-discovered entrypoint. In a normal parent environment that entrypoint registers only the sequential `subagent` tool; when `PI_SUBAGENT_CHILD=1`, it registers only the child-facing `complete_subagent` tool. The completion implementation is not a separate package entrypoint.
+The Subagents extension runs small, isolated batches of fresh Pi child processes while preserving bounded concurrency, private durable evidence, and structured outcomes. In a normal parent environment its package entrypoint registers only the sequential `subagent` tool; when `PI_SUBAGENT_CHILD=1`, it registers only `complete_subagent`.
 
-A parent request contains a required `tasks` array of one to three items. Each item has a non-empty single-line agent name, a non-empty task, and an optional non-empty single-line working directory. A working directory defaults to the parent context directory; relative values resolve from that directory, and the result must be an existing directory. The complete request and batch policy pass preflight before any run artifact or process is created.
+A parent request contains one to three tasks. Each task has a required non-empty instruction, an optional existing working directory, and an optional agent name that defaults to the always-available builtin `general`. Complete preflight still occurs before any run artifact or process is created, and results preserve request order.
 
-Tasks within one accepted request may run concurrently. Results always preserve request order, regardless of launch or completion order. Pi serializes separate `subagent` tool calls through the tool's sequential execution mode.
+## Agent Catalog
 
-## Global Agent Definitions
+Every invocation begins with an embedded `general` definition for arbitrary isolated work, then rediscovers optional user-global Markdown definitions from `<agent-dir>/subagents/agents/`. A valid unique global definition shadows a builtin of the same name. Invalid or duplicate global `general` candidates remain diagnostic while the builtin fallback stays selectable; discovery failures likewise do not prevent builtin selection. Explicit specialized names retain the existing missing, unavailable, indeterminate, and named-invalid failures.
 
-Definitions are rediscovered on every invocation from direct Markdown files in `<agent-dir>/subagents/agents/`. `<agent-dir>` follows the configured Pi agent-directory behavior described by [Extensions](./extensions.md). Project-local definition directories are not part of milestone one.
-
-Each definition has YAML frontmatter and a non-empty Markdown role prompt. Its supported frontmatter is:
-
-| Field         | Required | Contract                                                     |
-| ------------- | -------: | ------------------------------------------------------------ |
-| `name`        |      yes | Trimmed, non-empty, single-line public identifier            |
-| `description` |      yes | Trimmed, non-empty, single-line description                  |
-| `model`       |       no | Pi model pattern or canonical model identifier               |
-| `thinking`    |       no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
-| `tools`       |       no | Non-empty comma-separated unique tool allowlist              |
-
-Unknown fields, invalid values, an empty role prompt, or an unreadable file exclude that definition and produce a diagnostic without hiding valid neighbors. A missing definitions directory is empty discovery. A lookup is reported as genuinely missing only after complete discovery; directory probe/read failures report unavailable discovery, while unreadable or unparseable definitions whose names cannot be known make an otherwise absent lookup indeterminate. A requested named-invalid or duplicate definition fails with all matching definition diagnostics and paths. Every definition sharing a duplicate name is excluded. The resolved execution data copied into the durable manifest contains identity, model, thinking, tools, provider extensions, and the definition path, while the role prompt and completion requirements are preserved in the composed system-prompt artifact. Together these durable artifacts prevent later definition edits from changing an active run.
+Global frontmatter supports `name`, `description`, optional `model`, and optional `thinking`. Tool capability is not definition configuration. Unknown fields, including the removed `tools` field, invalidate a global definition. The resolved source is `builtin` or `global`, and only a global definition has a definition path.
 
 An omitted model inherits the parent model. An explicit model is resolved with Pi's CLI model semantics; the resolved canonical model and Pi-adjusted thinking level are used. Thinking otherwise inherits from the parent. Resolution warnings remain visible in progress and final diagnostics, while resolution errors fail preflight.
 
-## Tool Policy
+## Parent Tool Inheritance
 
-Tool allowlists control child tool availability and external provider loading; they do not classify agents or affect whether tasks may run concurrently. An omitted allowlist leaves Pi's normal child tool set available, while a declared allowlist is passed to the child together with `complete_subagent`.
+At invocation start the extension copies the parent's active tool names separately from all configured provider metadata. The durable parent snapshot preserves that captured sequence exactly, including duplicate entries. Preflight resolves one frozen capability plan in active-parent order and shares it across every task. Configured but inactive tools are not inherited, and later parent changes cannot alter an active batch.
 
-Children start with normal extension discovery disabled. For every declared tool, preflight requires exactly one parent-reported provider. Built-ins need no extension. SDK tools, synthetic provider paths, missing or ambiguous provenance, and non-file providers are rejected. Loadable external provider paths are canonicalized and deduplicated in first-use order. The child loads only the Subagents entrypoint and those required provider extensions; `subagent` and `complete_subagent` are reserved and cannot be requested by a definition.
+`subagent` and any parent `complete_subagent` entry are filtered as reserved policy. An active name that cannot be represented as exactly one unchanged non-empty item in Pi's single `--tools` transport is omitted with a sanitized durable diagnostic, preventing delimiter or whitespace reinterpretation. Builtins remain available without an extension. Active file-backed tools load through canonical provider paths deduplicated in first-use order. Missing, ambiguous, SDK-bound, synthetic, non-file, or uncanonicalizable providers are omitted with durable diagnostics rather than failing otherwise valid tasks. Effective child names remain unique, and `complete_subagent` is added exactly once, so a child may run with completion as its only tool.
 
-Pi 0.80.6 exposes only the winning registration for each tool through its public tool inventory. Core preflight rejects duplicates when they are supplied, but the live adapter cannot detect registrations Pi already collapsed and therefore validates only the visible winning provider.
+Pi 0.80.7 exposes only the winning registration for each tool through its public tool inventory. Core preflight detects duplicates when they are supplied, but live duplicate detection is limited to the winning registration exposed by Pi.
+
+## Child Invocation and Durable Evidence
+
+Children keep normal extension discovery disabled and load only the completion extension plus providers selected during preflight. Every command passes an explicit `--tools` list containing the frozen effective names. Additional tools registered by a loaded provider remain unavailable unless present in that list, including `subagent`.
+
+The manifest records resolved agent source, a definition path only for global agents, the parent active-name snapshot, effective child names, canonical provider paths, and unsupported-inheritance diagnostics. Progress and final structured details retain those diagnostics separately from child semantic concerns; model-facing text remains limited to ordered child status, summary, and optional report path.
 
 Disabling extension discovery does not disable normal project context discovery. Project skills follow Pi's saved non-interactive trust decision for each child working directory; the extension does not force project trust.
-
-## Child Invocation and Environment
-
-Children run Pi in JSON print mode without a session and without shell interpolation. Task text is read from its private artifact file rather than appearing directly in the process argument list. The child receives the resolved model and thinking level, the declared allowlist plus `complete_subagent` when an allowlist exists, the internal completion extension, and required external providers.
-
-The child environment copies the inherited parent environment and sets `PI_SUBAGENT_CHILD=1`. The composed system prompt appends the definition's role prompt, prohibits nested delegation, and requires structured completion. Nested subagents are also unavailable because the child branch does not register the parent tool.
 
 [Process Service](./process-service.md) owns launch acknowledgement, streams, scoped shutdown, and bounded EOF/SIGTERM/SIGKILL cleanup.
 
@@ -54,7 +42,7 @@ A semantic result is accepted only when exactly one `complete_subagent` call is 
 
 Runs live under `<agent-dir>/subagents/runs/<run-id>/` and contain a manifest, task, composed system prompt, raw JSONL events, stderr log, and status record. Directories are created with mode `0700` and files with mode `0600`. Run artifacts are retained until the user manually removes them; milestone one has no pruning or cleanup action. [File System Service](./file-system-service.md) owns the generic operations used for private creation and atomic status replacement.
 
-The manifest records creation time, request index and working directory, resolved agent configuration and provider paths, definition path, and all artifact paths. Raw stdout events are appended before interpretation, stderr is retained separately, and usage is accumulated from final assistant-message events.
+The manifest also records creation time, request index and working directory, and all artifact paths. Raw stdout events are appended before interpretation, stderr is retained separately, and usage is accumulated from final assistant-message events.
 
 The status lifecycle is monotonic:
 

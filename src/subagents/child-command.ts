@@ -92,16 +92,16 @@ export const buildChildInvocation = (
   const pi = selectExecutable();
   const extensions = canonicalExtensions(
     input.completionEntrypoint,
-    input.task.agent.providerExtensions,
+    input.task.toolInheritance.providerExtensions,
   );
   const extensionArgs = extensions.flatMap((extensionPath) => [
     "--extension",
     extensionPath,
   ]);
-  const toolArgs =
-    input.task.agent.tools === undefined
-      ? []
-      : ["--tools", [...input.task.agent.tools, "complete_subagent"].join(",")];
+  const toolArgs = [
+    "--tools",
+    input.task.toolInheritance.effectiveToolNames.join(","),
+  ];
 
   return Object.freeze({
     command: pi.command,

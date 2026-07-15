@@ -25,7 +25,6 @@ import {
   InvalidWorkingDirectoryError,
   PiEventStreamError,
   RunStoreError,
-  ToolProviderError,
   formatSubagentError,
   type SubagentError,
 } from "./errors";
@@ -186,15 +185,6 @@ const withErrorMessage = (
           ? {}
           : { agentName: error.agentName }),
       });
-    case "ToolProviderError":
-      return new ToolProviderError({
-        toolName: error.toolName,
-        message,
-        ...(error.source === undefined ? {} : { source: error.source }),
-        ...(error.providerPath === undefined
-          ? {}
-          : { providerPath: error.providerPath }),
-      });
     case "InvalidWorkingDirectoryError":
       return new InvalidWorkingDirectoryError({ cwd: error.cwd, message });
     case "RunStoreError":
@@ -337,9 +327,11 @@ export const makeSubagentBatch = (
           discovery,
           parent,
         });
-        const diagnostics = Object.freeze(
-          discovery.diagnostics.map(formatDiscoveryDiagnostic),
-        );
+        const toolDiagnostics = tasks[0]?.toolInheritance.diagnostics ?? [];
+        const diagnostics = Object.freeze([
+          ...discovery.diagnostics.map(formatDiscoveryDiagnostic),
+          ...toolDiagnostics,
+        ]);
         const created: Array<CreatedRun> = [];
         const executionScope = yield* Scope.make();
         const launchBarrierPassed = yield* Ref.make(false);

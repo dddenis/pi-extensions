@@ -123,6 +123,7 @@ const makeParentHarness = (options: ParentHarnessOptions = {}) => {
     },
   };
 
+  const activeToolNames = ["web_search", "read"];
   const tools = [
     {
       name: "read",
@@ -143,6 +144,15 @@ const makeParentHarness = (options: ParentHarnessOptions = {}) => {
         baseDir: "/extensions/search",
       },
     },
+    {
+      name: "configured_inactive",
+      sourceInfo: {
+        path: "<builtin:configured_inactive>",
+        source: "builtin",
+        scope: "temporary" as const,
+        origin: "top-level" as const,
+      },
+    },
   ];
 
   const port: ParentToolRegistrationPort = {
@@ -153,12 +163,15 @@ const makeParentHarness = (options: ParentHarnessOptions = {}) => {
       shutdown = handler;
     },
     getThinkingLevel: () => "high",
+    getActiveTools: () => activeToolNames,
     getAllTools: () => tools,
   };
 
   return {
     port,
     runtime,
+    activeToolNames,
+    tools,
     get tool() {
       if (tool === undefined) throw new Error("parent tool not registered");
       return tool;
@@ -204,7 +217,8 @@ const parentRuntimeInput = (
     cwd: "/parent/project",
     model: "openai-codex/gpt-5.4",
     thinking: "high",
-    tools: [],
+    activeToolNames: [],
+    toolProviders: [],
   },
   models: {
     resolve: () => Effect.die("model resolution is unused in this test"),
@@ -220,6 +234,9 @@ describe("subagent extension adapter", () => {
 
     expect(harness.tool.name).toBe("subagent");
     expect(harness.tool.executionMode).toBe("sequential");
+    expect(harness.tool.description).toBe(
+      "Run one to three isolated child agents. The `general` agent name is always available through a bundled fallback and is used when an agent name is omitted.",
+    );
     expect(harness.tool.parameters).toMatchObject({
       required: ["tasks"],
       additionalProperties: false,
@@ -228,12 +245,22 @@ describe("subagent extension adapter", () => {
           minItems: 1,
           maxItems: 3,
           items: {
-            required: ["agent", "task"],
             additionalProperties: false,
           },
         },
       },
     });
+    const itemSchema = harness.tool.parameters.properties.tasks.items;
+    expect(itemSchema.required).toEqual(["task"]);
+    expect(itemSchema.properties.agent).toMatchObject({
+      description:
+        "Optional agent definition name. Defaults to the always-available `general` agent. Specify another name only when intentionally using a specialized global definition.",
+    });
+    expect(
+      Value.Check(harness.tool.parameters, {
+        tasks: [{ task: "Inspect" }],
+      }),
+    ).toBe(true);
   });
 
   it("selects the parent or child default branch before constructing the other runtime", () => {
@@ -307,7 +334,8 @@ describe("subagent extension adapter", () => {
       cwd: "/parent/project",
       model: "openai-codex/gpt-5.4",
       thinking: "high",
-      tools: [
+      activeToolNames: ["web_search", "read"],
+      toolProviders: [
         {
           name: "read",
           source: "builtin",
@@ -319,13 +347,44 @@ describe("subagent extension adapter", () => {
           path: "./provider.ts",
           baseDir: "/extensions/search",
         },
+        {
+          name: "configured_inactive",
+          source: "builtin",
+          path: "<builtin:configured_inactive>",
+        },
       ],
     });
     expect(Object.isFrozen(harness.runtimeInput.parent)).toBe(true);
-    expect(Object.isFrozen(harness.runtimeInput.parent.tools)).toBe(true);
-    expect(harness.runtimeInput.parent.tools).not.toBe(
+    expect(Object.isFrozen(harness.runtimeInput.parent.activeToolNames)).toBe(
+      true,
+    );
+    expect(Object.isFrozen(harness.runtimeInput.parent.toolProviders)).toBe(
+      true,
+    );
+    expect(harness.runtimeInput.parent.activeToolNames).not.toBe(
+      harness.port.getActiveTools(),
+    );
+    expect(harness.runtimeInput.parent.toolProviders).not.toBe(
       harness.port.getAllTools(),
     );
+
+    harness.activeToolNames.push("late_active");
+    harness.tools.push({
+      name: "late_configured",
+      sourceInfo: {
+        path: "<builtin:late_configured>",
+        source: "builtin",
+        scope: "temporary",
+        origin: "top-level",
+      },
+    });
+    expect(harness.runtimeInput.parent.activeToolNames).toEqual([
+      "web_search",
+      "read",
+    ]);
+    expect(
+      harness.runtimeInput.parent.toolProviders.map(({ name }) => name),
+    ).toEqual(["read", "web_search", "configured_inactive"]);
   });
 
   it("allows an undefined parent model into preflight", async () => {
@@ -802,6 +861,7 @@ describe("parent managed runtime lifecycle", () => {
           sessionShutdown = handler;
         },
         getThinkingLevel: () => "high",
+        getActiveTools: () => [],
         getAllTools: () => [],
       },
       runtime,

@@ -1,7 +1,16 @@
 import path from "node:path";
 import { DateTime, Option, Schema } from "effect";
+import { GENERAL_AGENT_NAME } from "./general-agent";
 
 const trim = (value: string): string => value.trim();
+
+export const isToolNameTransportSafe = (value: string): boolean => {
+  const parsedNames = value
+    .split(",")
+    .map(trim)
+    .filter((name) => name.length > 0);
+  return parsedNames.length === 1 && parsedNames[0] === value;
+};
 
 const SINGLE_LINE_PATTERN = /^[^\r\n]+$/;
 const hasNoTerminalControls = (value: string): boolean =>
@@ -101,21 +110,6 @@ const SIGNAL_VALUES = [
 
 const SignalSchema = Schema.NullOr(Schema.Literal(...SIGNAL_VALUES));
 
-const ToolListSchema = Schema.transform(
-  NonEmptyTrimmedSingleLineStringSchema,
-  Schema.Array(NonEmptyTrimmedSingleLineStringSchema).pipe(
-    Schema.minItems(1),
-    Schema.filter((value) => new Set(value).size === value.length, {
-      description: "a unique tool allowlist",
-    }),
-  ),
-  {
-    strict: true,
-    decode: (value) => value.split(",").map((item) => item.trim()),
-    encode: (value) => value.join(", "),
-  },
-);
-
 const DiagnosticsSchema = Schema.Array(NonEmptyTrimmedSingleLineStringSchema);
 
 const stringArray = (value: ReadonlyArray<string>): ReadonlyArray<string> =>
@@ -178,7 +172,13 @@ export interface AgentFrontmatter {
   readonly description: string;
   readonly model?: string;
   readonly thinking?: ThinkingLevel;
-  readonly tools?: ReadonlyArray<string>;
+}
+
+export interface ToolInheritance {
+  readonly parentActiveToolNames: ReadonlyArray<string>;
+  readonly effectiveToolNames: ReadonlyArray<string>;
+  readonly providerExtensions: ReadonlyArray<string>;
+  readonly diagnostics: ReadonlyArray<string>;
 }
 
 export interface RunArtifacts {
@@ -197,21 +197,26 @@ export interface RunManifestTask {
   readonly cwd: string;
 }
 
-export interface RunManifestAgent {
+interface RunManifestAgentBase {
   readonly name: string;
   readonly description: string;
   readonly model: string;
   readonly thinking: ThinkingLevel;
-  readonly tools?: ReadonlyArray<string>;
-  readonly providerExtensions: ReadonlyArray<string>;
-  readonly definitionPath: string;
 }
+
+export type RunManifestAgent =
+  | (RunManifestAgentBase & { readonly source: "builtin" })
+  | (RunManifestAgentBase & {
+      readonly source: "global";
+      readonly definitionPath: string;
+    });
 
 export interface RunManifest {
   readonly runId: string;
   readonly createdAt: string;
   readonly task: RunManifestTask;
   readonly agent: RunManifestAgent;
+  readonly toolInheritance: ToolInheritance;
   readonly artifacts: RunArtifacts;
 }
 
@@ -253,26 +258,26 @@ export interface RunResult {
 
 export type SubagentToolDetails = CompletionResult;
 
-const TaskRequestSchema: Schema.Schema<SubagentTaskRequest> = Schema.Struct({
-  agent: NonEmptyTrimmedSingleLineStringSchema,
+const TaskRequestSchema = Schema.Struct({
+  agent: Schema.optionalWith(NonEmptyTrimmedSingleLineStringSchema, {
+    default: () => GENERAL_AGENT_NAME,
+  }),
   task: NonEmptyTrimmedStringSchema,
   cwd: Schema.optional(NonEmptyTrimmedSingleLineStringSchema),
 });
 
-export const SubagentRequestSchema: Schema.Schema<SubagentRequest> =
-  Schema.Struct({
-    tasks: Schema.Array(TaskRequestSchema).pipe(
-      Schema.minItems(1),
-      Schema.maxItems(3),
-    ),
-  });
+export const SubagentRequestSchema = Schema.Struct({
+  tasks: Schema.Array(TaskRequestSchema).pipe(
+    Schema.minItems(1),
+    Schema.maxItems(3),
+  ),
+});
 
 export const AgentFrontmatterSchema = Schema.Struct({
   name: NonEmptyTrimmedSingleLineStringSchema,
   description: NonEmptyTrimmedSingleLineStringSchema,
   model: Schema.optional(NonEmptyTrimmedSingleLineStringSchema),
   thinking: Schema.optional(ThinkingLevelSchema),
-  tools: Schema.optional(ToolListSchema),
 });
 
 const SummarySchema = Schema.transform(
@@ -317,21 +322,63 @@ const RunManifestTaskSchema: Schema.Schema<RunManifestTask> = Schema.Struct({
   cwd: AbsolutePathSchema,
 });
 
-const RunManifestAgentSchema: Schema.Schema<RunManifestAgent> = Schema.Struct({
+const TransportSafeToolNameSchema = Schema.String.pipe(
+  Schema.filter(isToolNameTransportSafe, {
+    description: "a tool name representable by Pi --tools",
+  }),
+);
+
+const UniqueToolNamesSchema = Schema.Array(TransportSafeToolNameSchema).pipe(
+  Schema.filter((value) => new Set(value).size === value.length, {
+    description: "unique tool names",
+  }),
+);
+
+const EffectiveToolNamesSchema = UniqueToolNamesSchema.pipe(
+  Schema.minItems(1),
+  Schema.filter(
+    (value) =>
+      value.filter((name) => name === "complete_subagent").length === 1,
+    {
+      description: "effective tools containing complete_subagent exactly once",
+    },
+  ),
+);
+
+export const ToolInheritanceSchema: Schema.Schema<ToolInheritance> =
+  Schema.Struct({
+    parentActiveToolNames: Schema.Array(Schema.String),
+    effectiveToolNames: EffectiveToolNamesSchema,
+    providerExtensions: Schema.Array(AbsolutePathSchema).pipe(
+      Schema.filter((value) => new Set(value).size === value.length, {
+        description: "unique canonical provider paths",
+      }),
+    ),
+    diagnostics: DiagnosticsSchema,
+  });
+
+const RunManifestAgentBase = {
   name: NonEmptyTrimmedSingleLineStringSchema,
   description: NonEmptyTrimmedSingleLineStringSchema,
   model: NonEmptyTrimmedSingleLineStringSchema,
   thinking: ThinkingLevelSchema,
-  tools: Schema.optional(Schema.Array(NonEmptyTrimmedSingleLineStringSchema)),
-  providerExtensions: Schema.Array(AbsolutePathSchema),
-  definitionPath: AbsolutePathSchema,
-});
+};
+
+const RunManifestAgentSchema: Schema.Schema<RunManifestAgent> = Schema.Union(
+  Schema.Struct({ ...RunManifestAgentBase, source: Schema.Literal("builtin") }),
+  Schema.Struct({
+    ...RunManifestAgentBase,
+    source: Schema.Literal("global"),
+    definitionPath: AbsolutePathSchema,
+  }),
+);
 
 export const RunManifestSchema: Schema.Schema<RunManifest> = Schema.Struct({
   runId: NonEmptyTrimmedSingleLineStringSchema,
   createdAt: IsoTimestampSchema,
   task: RunManifestTaskSchema,
   agent: RunManifestAgentSchema,
+  toolInheritance: ToolInheritanceSchema,
   artifacts: RunArtifactsSchema,
 });
 
@@ -394,7 +441,6 @@ const freezeAgentFrontmatter = (value: AgentFrontmatter): AgentFrontmatter =>
     description: value.description,
     ...(value.model === undefined ? {} : { model: value.model }),
     ...(value.thinking === undefined ? {} : { thinking: value.thinking }),
-    ...(value.tools === undefined ? {} : { tools: stringArray(value.tools) }),
   });
 
 const freezeRunArtifacts = (value: RunArtifacts): RunArtifacts =>
@@ -415,15 +461,30 @@ const freezeRunManifestTask = (value: RunManifestTask): RunManifestTask =>
     cwd: value.cwd,
   });
 
-const freezeRunManifestAgent = (value: RunManifestAgent): RunManifestAgent =>
-  Object.freeze({
+const freezeRunManifestAgent = (value: RunManifestAgent): RunManifestAgent => {
+  const base = {
     name: value.name,
     description: value.description,
     model: value.model,
     thinking: value.thinking,
-    ...(value.tools === undefined ? {} : { tools: stringArray(value.tools) }),
+  };
+  return Object.freeze(
+    value.source === "builtin"
+      ? { ...base, source: "builtin" as const }
+      : {
+          ...base,
+          source: "global" as const,
+          definitionPath: value.definitionPath,
+        },
+  );
+};
+
+const freezeToolInheritance = (value: ToolInheritance): ToolInheritance =>
+  Object.freeze({
+    parentActiveToolNames: stringArray(value.parentActiveToolNames),
+    effectiveToolNames: stringArray(value.effectiveToolNames),
     providerExtensions: stringArray(value.providerExtensions),
-    definitionPath: value.definitionPath,
+    diagnostics: stringArray(value.diagnostics),
   });
 
 const freezeRunManifest = (value: RunManifest): RunManifest =>
@@ -432,6 +493,7 @@ const freezeRunManifest = (value: RunManifest): RunManifest =>
     createdAt: value.createdAt,
     task: freezeRunManifestTask(value.task),
     agent: freezeRunManifestAgent(value.agent),
+    toolInheritance: freezeToolInheritance(value.toolInheritance),
     artifacts: freezeRunArtifacts(value.artifacts),
   });
 

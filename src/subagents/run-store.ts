@@ -189,10 +189,12 @@ const makeManifest = (
       description: task.agent.description,
       model: task.agent.model,
       thinking: task.agent.thinking,
-      ...(task.agent.tools === undefined ? {} : { tools: task.agent.tools }),
-      providerExtensions: task.agent.providerExtensions,
-      definitionPath: task.agent.definitionPath,
+      source: task.agent.source,
+      ...(task.agent.source === "global"
+        ? { definitionPath: task.agent.definitionPath }
+        : {}),
     },
+    toolInheritance: task.toolInheritance,
     artifacts,
   });
 

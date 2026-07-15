@@ -8,12 +8,27 @@ import {
   FileSystemService,
 } from "../services/file-system";
 import { type HomeDirectoryService } from "../services/home-directory";
+import {
+  GENERAL_AGENT_DESCRIPTION,
+  GENERAL_AGENT_NAME,
+  GENERAL_AGENT_ROLE_PROMPT,
+} from "./general-agent";
 import { type AgentFrontmatter, decodeAgentFrontmatter } from "./schemas";
 
-export interface DiscoveredAgent extends AgentFrontmatter {
+interface DiscoveredAgentBase extends AgentFrontmatter {
   readonly rolePrompt: string;
+}
+
+export interface BuiltinDiscoveredAgent extends DiscoveredAgentBase {
+  readonly source: "builtin";
+}
+
+export interface GlobalDiscoveredAgent extends DiscoveredAgentBase {
+  readonly source: "global";
   readonly definitionPath: string;
 }
+
+export type DiscoveredAgent = BuiltinDiscoveredAgent | GlobalDiscoveredAgent;
 
 export interface AgentDefinitionDiagnostic {
   readonly definitionPath: string;
@@ -34,7 +49,7 @@ export interface AgentDiscovery {
 
 interface ParsedDefinition {
   readonly _tag: "Definition";
-  readonly definition: DiscoveredAgent;
+  readonly definition: GlobalDiscoveredAgent;
 }
 
 interface ParsedDiagnostic {
@@ -60,7 +75,7 @@ const freezeDefinition = (
   frontmatter: AgentFrontmatter,
   rolePrompt: string,
   definitionPath: string,
-): DiscoveredAgent =>
+): GlobalDiscoveredAgent =>
   Object.freeze({
     name: frontmatter.name,
     description: frontmatter.description,
@@ -68,10 +83,8 @@ const freezeDefinition = (
     ...(frontmatter.thinking === undefined
       ? {}
       : { thinking: frontmatter.thinking }),
-    ...(frontmatter.tools === undefined
-      ? {}
-      : { tools: Object.freeze([...frontmatter.tools]) }),
     rolePrompt,
+    source: "global" as const,
     definitionPath,
   });
 
@@ -143,12 +156,37 @@ const fileSystemDiagnostic = (
 const catalogState = (tag: AgentCatalogState["_tag"]): AgentCatalogState =>
   Object.freeze({ _tag: tag });
 
-const emptyDiscovery = (): AgentDiscovery =>
-  Object.freeze({
+const builtinGeneral: DiscoveredAgent = Object.freeze({
+  name: GENERAL_AGENT_NAME,
+  description: GENERAL_AGENT_DESCRIPTION,
+  rolePrompt: GENERAL_AGENT_ROLE_PROMPT,
+  source: "builtin",
+});
+
+const mergeWithBuiltins = (
+  globals: ReadonlyArray<DiscoveredAgent>,
+  diagnostics: ReadonlyArray<AgentDefinitionDiagnostic>,
+): ReadonlyArray<DiscoveredAgent> => {
+  const globalGeneral = globals.find(({ name }) => name === GENERAL_AGENT_NAME);
+  const globalGeneralIsUncontested =
+    globalGeneral !== undefined &&
+    !diagnostics.some(({ agentName }) => agentName === GENERAL_AGENT_NAME);
+  return Object.freeze([
+    globalGeneralIsUncontested ? globalGeneral : builtinGeneral,
+    ...globals.filter(({ name }) => name !== GENERAL_AGENT_NAME),
+  ]);
+};
+
+const emptyDiscovery = (): AgentDiscovery => {
+  const diagnostics: ReadonlyArray<AgentDefinitionDiagnostic> = Object.freeze(
+    [],
+  );
+  return Object.freeze({
     catalog: catalogState("Complete"),
-    definitions: Object.freeze([]),
-    diagnostics: Object.freeze([]),
+    definitions: mergeWithBuiltins([], diagnostics),
+    diagnostics,
   });
+};
 
 const discoverInDirectory = (
   definitionsDirectory: string,
@@ -165,7 +203,7 @@ const discoverInDirectory = (
     if (exists !== true) {
       return Object.freeze({
         catalog: catalogState("Unavailable"),
-        definitions: Object.freeze([]),
+        definitions: mergeWithBuiltins([], [exists]),
         diagnostics: Object.freeze([exists]),
       });
     }
@@ -184,7 +222,7 @@ const discoverInDirectory = (
     if (directoryRead._tag === "Failure") {
       return Object.freeze({
         catalog: catalogState("Unavailable"),
-        definitions: Object.freeze([]),
+        definitions: mergeWithBuiltins([], [directoryRead.diagnostic]),
         diagnostics: Object.freeze([directoryRead.diagnostic]),
       });
     }
@@ -241,7 +279,7 @@ const discoverInDirectory = (
           ? "Indeterminate"
           : "Complete",
       ),
-      definitions: Object.freeze(uniqueDefinitions),
+      definitions: mergeWithBuiltins(uniqueDefinitions, allDiagnostics),
       diagnostics: allDiagnostics,
     });
   });

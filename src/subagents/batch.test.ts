@@ -50,7 +50,8 @@ const parent: ParentSnapshot = {
   cwd: "/repo",
   model: "openai/parent",
   thinking: "medium",
-  tools: [],
+  activeToolNames: ["read"],
+  toolProviders: [{ name: "read", source: "builtin", path: "<builtin:read>" }],
 };
 
 const emptyDiscovery: AgentDiscovery = {
@@ -61,7 +62,7 @@ const emptyDiscovery: AgentDiscovery = {
 
 const task = (
   index: number,
-  tools: ReadonlyArray<string> | undefined = ["read"],
+  toolDiagnostics: ReadonlyArray<string> = [],
 ): ResolvedTask => ({
   index,
   task: `task-${index}`,
@@ -72,10 +73,15 @@ const task = (
     rolePrompt: "Test the requested behavior.",
     model: "openai/test",
     thinking: "medium",
-    ...(tools === undefined ? {} : { tools }),
-    providerExtensions: [],
+    source: "global",
     definitionPath: `/agents/agent-${index}.md`,
   },
+  toolInheritance: Object.freeze({
+    parentActiveToolNames: Object.freeze(["read"]),
+    effectiveToolNames: Object.freeze(["read", "complete_subagent"]),
+    providerExtensions: Object.freeze([]),
+    diagnostics: Object.freeze([...toolDiagnostics]),
+  }),
 });
 
 const requestFor = (tasks: ReadonlyArray<ResolvedTask>): unknown => ({
@@ -349,10 +355,12 @@ describe("SubagentBatch setup and successful execution", () => {
   );
 
   it.effect(
-    "retains unrelated discovery warnings in progress and the successful batch result",
+    "retains discovery and tool warnings in progress and the successful batch result",
     () =>
       Effect.gen(function* () {
-        const item = task(0);
+        const toolWarning =
+          'Inherited tool "sdk_bound" omitted: SDK tools cannot be recreated in a child process';
+        const item = task(0, [toolWarning]);
         const warning = {
           definitionPath: "/agents/unreadable.md",
           message: "permission denied",
@@ -395,8 +403,15 @@ describe("SubagentBatch setup and successful execution", () => {
         expect(execution.results.map(({ runId }) => runId)).toEqual(["run-0"]);
         expect(execution.diagnostics).toEqual([
           "agent definition (/agents/unreadable.md): permission denied",
+          toolWarning,
         ]);
         expect(observed[0]?.diagnostics).toEqual(execution.diagnostics);
+        expect(
+          execution.diagnostics.filter((value) => value === toolWarning),
+        ).toHaveLength(1);
+        expect(
+          observed[0]?.diagnostics.filter((value) => value === toolWarning),
+        ).toHaveLength(1);
         expect(Object.isFrozen(execution)).toBe(true);
         expect(Object.isFrozen(execution.diagnostics)).toBe(true);
       }),
@@ -409,11 +424,7 @@ describe("SubagentBatch setup and successful execution", () => {
         const active = yield* Ref.make(0);
         const maximum = yield* Ref.make(0);
         const allStarted = yield* Deferred.make<void>();
-        const tasks = [
-          task(0, ["bash"]),
-          task(1, ["edit"]),
-          task(2, ["write"]),
-        ];
+        const tasks = [task(0), task(1), task(2)];
         const harness = yield* makeHarness({
           tasks,
           executor: () =>

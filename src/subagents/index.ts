@@ -27,7 +27,6 @@ import {
   InvalidWorkingDirectoryError,
   PiEventStreamError,
   RunStoreError,
-  ToolProviderError,
   formatSubagentError,
   type SubagentError,
 } from "./errors";
@@ -49,10 +48,13 @@ import { sanitizeTerminalText } from "./terminal-text";
 
 const TaskParameters = Type.Object(
   {
-    agent: Type.String({
-      minLength: 1,
-      description: "Agent definition name",
-    }),
+    agent: Type.Optional(
+      Type.String({
+        minLength: 1,
+        description:
+          "Optional agent definition name. Defaults to the always-available `general` agent. Specify another name only when intentionally using a specialized global definition.",
+      }),
+    ),
     task: Type.String({
       minLength: 1,
       description: "Task for the child agent",
@@ -141,6 +143,7 @@ export interface ParentToolRegistrationPort {
   readonly registerTool: (tool: ParentToolDefinition) => void;
   readonly onSessionShutdown: (handler: () => Promise<void>) => void;
   readonly getThinkingLevel: () => ThinkingLevel;
+  readonly getActiveTools: () => ReadonlyArray<string>;
   readonly getAllTools: () => ReadonlyArray<{
     readonly name: string;
     readonly sourceInfo: {
@@ -229,7 +232,6 @@ export interface SubagentCompositionPorts {
 const isSubagentError = (error: unknown): error is SubagentError =>
   error instanceof InvalidSubagentInput ||
   error instanceof AgentDefinitionError ||
-  error instanceof ToolProviderError ||
   error instanceof InvalidWorkingDirectoryError ||
   error instanceof RunStoreError ||
   error instanceof ChildProcessError ||
@@ -298,15 +300,18 @@ const snapshotParent = (
   port: ParentToolRegistrationPort,
   context: ParentToolExecutionContext,
 ): ParentSnapshot => {
-  const tools = port.getAllTools().map(({ name, sourceInfo }) =>
-    Object.freeze({
-      name,
-      source: sourceInfo.source,
-      path: sourceInfo.path,
-      ...(sourceInfo.baseDir === undefined
-        ? {}
-        : { baseDir: sourceInfo.baseDir }),
-    }),
+  const activeToolNames = Object.freeze([...port.getActiveTools()]);
+  const toolProviders = Object.freeze(
+    port.getAllTools().map(({ name, sourceInfo }) =>
+      Object.freeze({
+        name,
+        source: sourceInfo.source,
+        path: sourceInfo.path,
+        ...(sourceInfo.baseDir === undefined
+          ? {}
+          : { baseDir: sourceInfo.baseDir }),
+      }),
+    ),
   );
   return Object.freeze({
     cwd: context.cwd,
@@ -314,7 +319,8 @@ const snapshotParent = (
       ? {}
       : { model: `${context.model.provider}/${context.model.id}` }),
     thinking: port.getThinkingLevel(),
-    tools: Object.freeze(tools),
+    activeToolNames,
+    toolProviders,
   });
 };
 
@@ -361,7 +367,7 @@ export const registerParentTool = (
     name: "subagent",
     label: "Subagent",
     description:
-      "Run one to three isolated child agents and return ordered structured results.",
+      "Run one to three isolated child agents. The `general` agent name is always available through a bundled fallback and is used when an agent name is omitted.",
     parameters: SubagentParameters,
     executionMode: "sequential",
     execute: async (_toolCallId, params, signal, onUpdate, context) => {
@@ -597,6 +603,7 @@ const parentPort = (pi: ExtensionAPI): ParentToolRegistrationPort => ({
     pi.on("session_shutdown", () => handler());
   },
   getThinkingLevel: () => pi.getThinkingLevel(),
+  getActiveTools: () => pi.getActiveTools(),
   getAllTools: () => pi.getAllTools(),
 });
 

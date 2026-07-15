@@ -10,6 +10,19 @@ import { discoverAgents } from "./agents";
 
 const agentDirectory = "/agent";
 const definitionsDirectory = path.join(agentDirectory, "subagents", "agents");
+const GENERAL_AGENT_ROLE_PROMPT = `You are a general-purpose subagent. Complete exactly the delegated task using
+available tools.
+
+Treat the task's supplied scope, paths, constraints, acceptance criteria,
+validation requirements, and output contract as authoritative. Inspect evidence
+rather than guessing. Make only changes required by the task, and do not broaden
+scope or make unapproved product or architecture decisions.
+
+If required information is missing, report NEEDS_CONTEXT. If the task cannot be
+completed, report BLOCKED. Use DONE_WITH_CONCERNS only when the requested work is
+complete but material uncertainty remains. When the task requires a durable
+report, write it to the supplied absolute path and return that path through
+structured completion.`;
 
 const definition = (
   name: string,
@@ -17,16 +30,13 @@ const definition = (
     readonly description?: string;
     readonly model?: string;
     readonly thinking?: string;
-    readonly tools?: string;
     readonly body?: string;
   } = {},
 ): string => `---
 name: ${name}
 description: ${options.description ?? `The ${name} agent`}${
   options.model === undefined ? "" : `\nmodel: ${options.model}`
-}${options.thinking === undefined ? "" : `\nthinking: ${options.thinking}`}${
-  options.tools === undefined ? "" : `\ntools: ${options.tools}`
-}
+}${options.thinking === undefined ? "" : `\nthinking: ${options.thinking}`}
 ---
 ${options.body ?? `Act as ${name}.`}`;
 
@@ -40,6 +50,149 @@ const layer = (config: Parameters<typeof FileSystemServiceTest.layer>[0]) =>
   );
 
 describe("discoverAgents", () => {
+  it.effect(
+    "always exposes builtin general when global discovery is missing",
+    () =>
+      Effect.gen(function* () {
+        const result = yield* discoverAgents;
+        expect(result.definitions).toEqual([
+          {
+            name: "general",
+            description: "General-purpose isolated task executor",
+            rolePrompt: GENERAL_AGENT_ROLE_PROMPT,
+            source: "builtin",
+          },
+        ]);
+        expect(result.catalog).toEqual({ _tag: "Complete" });
+      }).pipe(
+        Effect.provide(
+          layer({ exists: new Map([[definitionsDirectory, false]]) }),
+        ),
+      ),
+  );
+
+  it.effect("lets one valid global general shadow the builtin", () => {
+    const definitionPath = path.join(definitionsDirectory, "general.md");
+    return Effect.gen(function* () {
+      const result = yield* discoverAgents;
+      expect(result.definitions[0]).toEqual({
+        name: "general",
+        description: "Customized general",
+        model: "openai/custom",
+        rolePrompt: "Use the approved custom role.",
+        source: "global",
+        definitionPath,
+      });
+    }).pipe(
+      Effect.provide(
+        layer({
+          exists: new Map([[definitionsDirectory, true]]),
+          directories: new Map([
+            [definitionsDirectory, [{ name: "general.md", kind: "file" }]],
+          ]),
+          contents: new Map([
+            [
+              definitionPath,
+              definition("general", {
+                description: "Customized general",
+                model: "openai/custom",
+                body: "Use the approved custom role.",
+              }),
+            ],
+          ]),
+        }),
+      ),
+    );
+  });
+
+  it.effect(
+    "retains builtin general for malformed or duplicate globals",
+    () => {
+      const malformed = path.join(definitionsDirectory, "malformed.md");
+      const first = path.join(definitionsDirectory, "first.md");
+      const second = path.join(definitionsDirectory, "second.md");
+      return Effect.gen(function* () {
+        const result = yield* discoverAgents;
+        expect(result.definitions[0]).toMatchObject({
+          name: "general",
+          source: "builtin",
+        });
+        expect(result.diagnostics.map(({ agentName }) => agentName)).toEqual([
+          "general",
+          "general",
+          "general",
+        ]);
+      }).pipe(
+        Effect.provide(
+          layer({
+            exists: new Map([[definitionsDirectory, true]]),
+            directories: new Map([
+              [
+                definitionsDirectory,
+                [malformed, first, second].map((filePath) => ({
+                  name: path.basename(filePath),
+                  kind: "file" as const,
+                })),
+              ],
+            ]),
+            contents: new Map([
+              [
+                malformed,
+                "---\nname: general\ndescription: Legacy\ntools: read\n---\nLegacy role.",
+              ],
+              [first, definition("general")],
+              [second, definition("general")],
+            ]),
+          }),
+        ),
+      );
+    },
+  );
+
+  it.effect(
+    "keeps builtin when a valid general has an invalid namesake",
+    () => {
+      const valid = path.join(definitionsDirectory, "valid-general.md");
+      const invalid = path.join(definitionsDirectory, "invalid-general.md");
+      return Effect.gen(function* () {
+        const result = yield* discoverAgents;
+        expect(result.definitions[0]).toMatchObject({
+          name: "general",
+          source: "builtin",
+        });
+        expect(result.diagnostics).toEqual([
+          {
+            definitionPath: invalid,
+            agentName: "general",
+            message: expect.stringContaining("tools"),
+          },
+        ]);
+      }).pipe(
+        Effect.provide(
+          layer({
+            exists: new Map([[definitionsDirectory, true]]),
+            directories: new Map([
+              [
+                definitionsDirectory,
+                [valid, invalid].map((filePath) => ({
+                  name: path.basename(filePath),
+                  kind: "file" as const,
+                })),
+              ],
+            ]),
+            contents: new Map([
+              [valid, definition("general")],
+              [
+                invalid,
+                "---\nname: general\ndescription: Invalid namesake\ntools: read\n---\nInvalid role.",
+              ],
+            ]),
+          }),
+        ),
+      );
+    },
+  );
+
   it.effect(
     "discovers only direct markdown regular files and freezes values",
     () => {
@@ -63,7 +216,6 @@ describe("discoverAgents", () => {
             definition("alpha", {
               model: "openai/gpt",
               thinking: "high",
-              tools: "read, grep",
               body: "Review carefully.",
             }),
           ],
@@ -76,12 +228,18 @@ describe("discoverAgents", () => {
           catalog: { _tag: "Complete" },
           definitions: [
             {
+              name: "general",
+              description: "General-purpose isolated task executor",
+              rolePrompt: GENERAL_AGENT_ROLE_PROMPT,
+              source: "builtin",
+            },
+            {
               name: "alpha",
               description: "The alpha agent",
               model: "openai/gpt",
               thinking: "high",
-              tools: ["read", "grep"],
               rolePrompt: "Review carefully.",
+              source: "global",
               definitionPath: alphaPath,
             },
           ],
@@ -90,7 +248,9 @@ describe("discoverAgents", () => {
         expect(Object.isFrozen(result)).toBe(true);
         expect(Object.isFrozen(result.definitions)).toBe(true);
         expect(Object.isFrozen(result.definitions[0])).toBe(true);
-        expect(Object.isFrozen(result.definitions[0]?.tools)).toBe(true);
+        expect(result.definitions.every((agent) => !("tools" in agent))).toBe(
+          true,
+        );
       }).pipe(Effect.provide(testLayer));
     },
   );
@@ -112,7 +272,7 @@ describe("discoverAgents", () => {
           ],
         ]),
         contents: new Map([
-          [alphaPath, definition("alpha", { tools: "read, grep" })],
+          [alphaPath, definition("alpha")],
           [
             legacyPath,
             "---\nname: legacy\ndescription: Legacy definition\nwriter: false\n---\nHandle the task.",
@@ -122,8 +282,13 @@ describe("discoverAgents", () => {
 
       return Effect.gen(function* () {
         const result = yield* discoverAgents;
-        expect(result.definitions.map(({ name }) => name)).toEqual(["alpha"]);
-        expect(result.definitions[0]).not.toHaveProperty("writer");
+        expect(result.definitions.map(({ name }) => name)).toEqual([
+          "general",
+          "alpha",
+        ]);
+        expect(result.definitions.every((agent) => !("writer" in agent))).toBe(
+          true,
+        );
         expect(result.diagnostics).toEqual([
           {
             definitionPath: legacyPath,
@@ -166,7 +331,10 @@ describe("discoverAgents", () => {
       return Effect.gen(function* () {
         const result = yield* discoverAgents;
         expect(result.catalog).toEqual({ _tag: "Indeterminate" });
-        expect(result.definitions.map(({ name }) => name)).toEqual(["valid"]);
+        expect(result.definitions.map(({ name }) => name)).toEqual([
+          "general",
+          "valid",
+        ]);
         expect(result.diagnostics).toHaveLength(3);
         expect(
           result.diagnostics.map(({ definitionPath }) => definitionPath),
@@ -209,7 +377,10 @@ describe("discoverAgents", () => {
 
     return Effect.gen(function* () {
       const result = yield* discoverAgents;
-      expect(result.definitions.map(({ name }) => name)).toEqual(["unique"]);
+      expect(result.definitions.map(({ name }) => name)).toEqual([
+        "general",
+        "unique",
+      ]);
       expect(result.diagnostics).toHaveLength(2);
       expect(result.diagnostics.map(({ agentName }) => agentName)).toEqual([
         "duplicate",
@@ -219,7 +390,7 @@ describe("discoverAgents", () => {
   });
 
   it.effect(
-    "returns empty for a missing directory and diagnoses unreadable directories",
+    "returns builtin general for missing or unreadable directories",
     () => {
       const missingLayer = layer({
         exists: new Map([[definitionsDirectory, false]]),
@@ -265,13 +436,18 @@ describe("discoverAgents", () => {
           yield* discoverAgents.pipe(Effect.provide(missingLayer)),
         ).toEqual({
           catalog: { _tag: "Complete" },
-          definitions: [],
+          definitions: [
+            expect.objectContaining({ name: "general", source: "builtin" }),
+          ],
           diagnostics: [],
         });
         const probeFailure = yield* discoverAgents.pipe(
           Effect.provide(probeFailureLayer),
         );
         expect(probeFailure.catalog).toEqual({ _tag: "Unavailable" });
+        expect(probeFailure.definitions).toEqual([
+          expect.objectContaining({ name: "general", source: "builtin" }),
+        ]);
         expect(probeFailure.diagnostics).toEqual([
           {
             definitionPath: definitionsDirectory,
@@ -283,7 +459,9 @@ describe("discoverAgents", () => {
           Effect.provide(unreadableLayer),
         );
         expect(unreadable.catalog).toEqual({ _tag: "Unavailable" });
-        expect(unreadable.definitions).toEqual([]);
+        expect(unreadable.definitions).toEqual([
+          expect.objectContaining({ name: "general", source: "builtin" }),
+        ]);
         expect(unreadable.diagnostics).toEqual([
           {
             definitionPath: definitionsDirectory,
@@ -305,10 +483,14 @@ describe("discoverAgents", () => {
     });
 
     return Effect.gen(function* () {
-      expect((yield* discoverAgents).definitions[0]?.name).toBe("first");
+      expect(
+        (yield* discoverAgents).definitions.map(({ name }) => name),
+      ).toEqual(["general", "first"]);
       const fileSystem = yield* FileSystemServiceTest;
       yield* fileSystem.setContent(filePath, definition("second"));
-      expect((yield* discoverAgents).definitions[0]?.name).toBe("second");
+      expect(
+        (yield* discoverAgents).definitions.map(({ name }) => name),
+      ).toEqual(["general", "second"]);
       const state = yield* fileSystem.getState;
       expect(
         state.calls.filter(

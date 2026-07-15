@@ -12,7 +12,15 @@ const taskText = "Inspect the private implementation details.";
 const rolePrompt = "Act as a careful agent for private implementation details.";
 
 const resolvedTask = (
-  tools: ReadonlyArray<string> | null = ["read", "web_search"],
+  toolInheritance: ResolvedTask["toolInheritance"] = {
+    parentActiveToolNames: ["read", "web_search", "subagent"],
+    effectiveToolNames: ["read", "web_search", "complete_subagent"],
+    providerExtensions: [
+      "/extensions/provider.ts",
+      "/extensions/../extensions/provider.ts",
+    ],
+    diagnostics: [],
+  },
 ): ResolvedTask => ({
   index: 0,
   task: taskText,
@@ -23,13 +31,10 @@ const resolvedTask = (
     rolePrompt,
     model: "openai-codex/gpt-5.4",
     thinking: "high",
-    ...(tools === null ? {} : { tools }),
-    providerExtensions: [
-      "/extensions/provider.ts",
-      "/extensions/../extensions/provider.ts",
-    ],
+    source: "global",
     definitionPath: "/agents/alpha.md",
   },
+  toolInheritance,
 });
 
 const artifacts: RunArtifacts = {
@@ -104,10 +109,15 @@ describe("buildChildInvocation", () => {
     expect([invocation.command, ...invocation.args]).not.toContain(rolePrompt);
   });
 
-  it("omits --tools when the agent has no allowlist while retaining completion", () => {
+  it("always passes an explicit completion-only tool list", () => {
     const invocation = buildChildInvocation(
       {
-        task: resolvedTask(null),
+        task: resolvedTask({
+          parentActiveToolNames: ["subagent"],
+          effectiveToolNames: ["complete_subagent"],
+          providerExtensions: [],
+          diagnostics: [],
+        }),
         artifacts,
         parentEnv: {},
         completionEntrypoint: "/repo/src/subagents/index.ts",
@@ -115,20 +125,23 @@ describe("buildChildInvocation", () => {
       runtime("/compiled/pi", ["/compiled/pi"]),
     );
 
-    expect(invocation.command).toBe("/compiled/pi");
-    expect(invocation.args).not.toContain("--tools");
-    expect(invocation.args).toContain("/repo/src/subagents/index.ts");
+    const toolsIndex = invocation.args.indexOf("--tools");
+    expect(toolsIndex).toBeGreaterThanOrEqual(0);
+    expect(invocation.args[toolsIndex + 1]).toBe("complete_subagent");
+    expect(invocation.args.filter((value) => value === "--tools")).toHaveLength(
+      1,
+    );
   });
 
   it("canonicalizes and deduplicates all explicit extension paths", () => {
     const completionEntrypoint = path.join("/repo", "src/subagents/index.ts");
-    const task = resolvedTask(["read"]);
+    const task = resolvedTask();
     const invocation = buildChildInvocation(
       {
         task: {
           ...task,
-          agent: {
-            ...task.agent,
+          toolInheritance: {
+            ...task.toolInheritance,
             providerExtensions: [
               "/repo/src/subagents/./index.ts",
               "/extensions/a/../provider.ts",
@@ -152,6 +165,32 @@ describe("buildChildInvocation", () => {
       "/repo/src/subagents/index.ts",
       "/extensions/provider.ts",
     ]);
+  });
+
+  it("loads a selected provider without activating its unrelated tools", () => {
+    const invocation = buildChildInvocation({
+      task: resolvedTask({
+        parentActiveToolNames: ["inherited_probe", "subagent"],
+        effectiveToolNames: ["inherited_probe", "complete_subagent"],
+        providerExtensions: ["/extensions/multi-tool-provider.ts"],
+        diagnostics: [],
+      }),
+      artifacts,
+      parentEnv: {},
+      completionEntrypoint: "/completion.ts",
+    });
+    const toolsIndex = invocation.args.indexOf("--tools");
+    const toolsValue = invocation.args[toolsIndex + 1];
+    expect(toolsValue).toBe("inherited_probe,complete_subagent");
+    expect(
+      toolsValue
+        ?.split(",")
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0),
+    ).toEqual(["inherited_probe", "complete_subagent"]);
+    expect(invocation.args).toContain("/extensions/multi-tool-provider.ts");
+    expect(toolsValue).not.toContain("subagent,");
+    expect(toolsValue).not.toContain("provider_extra");
   });
 
   it("runs a real argv[1] Pi script through process.execPath", () => {

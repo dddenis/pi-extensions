@@ -68,10 +68,15 @@ const resolvedTask: ResolvedTask = {
     rolePrompt: "Inspect private source carefully.",
     model: "openai-codex/gpt-5.4",
     thinking: "high",
-    tools: ["read"],
-    providerExtensions: ["/extensions/read.ts"],
+    source: "global",
     definitionPath: "/agents/alpha.md",
   },
+  toolInheritance: Object.freeze({
+    parentActiveToolNames: Object.freeze(["read"]),
+    effectiveToolNames: Object.freeze(["read", "complete_subagent"]),
+    providerExtensions: Object.freeze(["/extensions/read.ts"]),
+    diagnostics: Object.freeze([]),
+  }),
 };
 
 interface FakeRunState {

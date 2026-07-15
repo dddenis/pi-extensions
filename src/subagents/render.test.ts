@@ -114,6 +114,14 @@ const renderProgress = (
   );
 
 describe("subagent rendering", () => {
+  it("renders omitted raw agent names as general", () => {
+    const lines = renderSubagentCall(
+      { tasks: [{ task: "Inspect" }] },
+      theme,
+    ).render(120);
+    expect(lines.join("\n")).toContain("general");
+  });
+
   it("formats final model results exactly in request order", () => {
     expect(
       formatModelResult([

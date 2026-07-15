@@ -1,6 +1,7 @@
 import type { Component } from "@earendil-works/pi-tui";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { BatchProgress } from "./batch";
+import { GENERAL_AGENT_NAME } from "./general-agent";
 import type { RunResult, TerminalStatus } from "./schemas";
 import { sanitizeTerminalText } from "./terminal-text";
 
@@ -21,7 +22,7 @@ export interface RenderTheme {
 
 export interface SubagentCallArguments {
   readonly tasks: ReadonlyArray<{
-    readonly agent: string;
+    readonly agent?: string;
     readonly task: string;
     readonly cwd?: string;
   }>;
@@ -250,7 +251,7 @@ export const renderSubagentCall = (
 ): Component => {
   const count = args.tasks.length;
   const agents = args.tasks
-    .map(({ agent }) => sanitizeTerminalText(agent))
+    .map(({ agent }) => sanitizeTerminalText(agent ?? GENERAL_AGENT_NAME))
     .join(", ");
   return componentFromLines([
     `${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("muted", `${count} ${count === 1 ? "child" : "children"}`)}${agents.length === 0 ? "" : ` ${theme.fg("accent", agents)}`}`,

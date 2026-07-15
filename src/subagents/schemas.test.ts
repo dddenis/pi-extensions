@@ -31,9 +31,14 @@ const manifest = {
     description: "Inspect contracts",
     model: "provider/model",
     thinking: "medium",
-    tools: ["read", "grep"],
-    providerExtensions: ["/ext/alpha.ts"],
+    source: "global",
     definitionPath: "/agents/alpha.md",
+  },
+  toolInheritance: {
+    parentActiveToolNames: ["read", "grep", "subagent"],
+    effectiveToolNames: ["read", "grep", "complete_subagent"],
+    providerExtensions: ["/ext/alpha.ts"],
+    diagnostics: [],
   },
   artifacts: {
     runId: "run-1",
@@ -48,12 +53,13 @@ const manifest = {
 };
 
 describe("subagent schemas", () => {
-  it("accepts a single trimmed task", () => {
-    expect(
-      decodeTasks({ tasks: [{ agent: " alpha ", task: " inspect " }] }),
-    ).toEqual({
-      tasks: [{ agent: "alpha", task: "inspect" }],
+  it("defaults an omitted or undefined agent to general", () => {
+    expect(decodeTasks({ tasks: [{ task: " inspect " }] })).toEqual({
+      tasks: [{ agent: "general", task: "inspect" }],
     });
+    expect(
+      decodeTasks({ tasks: [{ agent: undefined, task: "inspect" }] }),
+    ).toEqual({ tasks: [{ agent: "general", task: "inspect" }] });
   });
 
   it("accepts three tasks", () => {
@@ -97,32 +103,28 @@ describe("subagent schemas", () => {
     ).toThrow();
   });
 
-  it("accepts the supported frontmatter and preserves optional absence", () => {
+  it("accepts only identity, model, and thinking frontmatter", () => {
     expect(
       decodeAgentFrontmatter({
         name: " alpha ",
         description: " inspect contracts ",
         model: " provider/model ",
         thinking: "medium",
-        tools: " read, grep ",
       }),
     ).toEqual({
       name: "alpha",
       description: "inspect contracts",
       model: "provider/model",
       thinking: "medium",
-      tools: ["read", "grep"],
     });
 
-    expect(
-      Object.prototype.hasOwnProperty.call(
-        decodeAgentFrontmatter({
-          name: "beta",
-          description: "Inspect only",
-        }),
-        "tools",
-      ),
-    ).toBe(false);
+    expect(() =>
+      decodeAgentFrontmatter({
+        name: "legacy",
+        description: "Legacy allowlist",
+        tools: "read, grep",
+      }),
+    ).toThrow();
   });
 
   it("rejects mutation classification as unknown frontmatter", () => {
@@ -154,26 +156,12 @@ describe("subagent schemas", () => {
     ).toThrow();
   });
 
-  it("rejects invalid frontmatter thinking and tools", () => {
+  it("rejects invalid frontmatter thinking", () => {
     expect(() =>
       decodeAgentFrontmatter({
         name: "alpha",
         description: "Inspect",
         thinking: "turbo",
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeAgentFrontmatter({
-        name: "alpha",
-        description: "Inspect",
-        tools: "   ",
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeAgentFrontmatter({
-        name: "alpha",
-        description: "Inspect",
-        tools: "read, grep, read",
       }),
     ).toThrow();
   });
@@ -261,6 +249,104 @@ describe("subagent schemas", () => {
         JSON.stringify({ status: "RUNNING", updatedAt: iso }),
       ),
     ).toEqual({ status: "RUNNING", updatedAt: iso });
+  });
+
+  it("preserves duplicate and transport-unsafe parent active-name evidence", () => {
+    const parentActiveToolNames = [
+      "read",
+      "read",
+      " subagent ",
+      "subagent,probe",
+      "",
+    ];
+    const decoded = decodeRunManifest({
+      ...manifest,
+      toolInheritance: {
+        ...manifest.toolInheritance,
+        parentActiveToolNames,
+        effectiveToolNames: ["read", "complete_subagent"],
+      },
+    });
+    const decodedJson = decodeRunManifestJson(JSON.stringify(decoded));
+
+    parentActiveToolNames[0] = "mutated";
+    expect(decoded.toolInheritance.parentActiveToolNames).toEqual([
+      "read",
+      "read",
+      " subagent ",
+      "subagent,probe",
+      "",
+    ]);
+    expect(decodedJson.toolInheritance.parentActiveToolNames).toEqual(
+      decoded.toolInheritance.parentActiveToolNames,
+    );
+    expect(Object.isFrozen(decoded.toolInheritance.parentActiveToolNames)).toBe(
+      true,
+    );
+  });
+
+  it("rejects transport-unsafe or duplicate effective tool names", () => {
+    for (const effectiveToolNames of [
+      ["subagent,probe", "complete_subagent"],
+      [" read ", "complete_subagent"],
+      ["read", "read", "complete_subagent"],
+    ]) {
+      expect(() =>
+        decodeRunManifest({
+          ...manifest,
+          toolInheritance: {
+            ...manifest.toolInheritance,
+            effectiveToolNames,
+          },
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("enforces builtin/global provenance and one completion tool", () => {
+    expect(
+      decodeRunManifest({
+        ...manifest,
+        agent: {
+          name: "general",
+          description: "General-purpose isolated task executor",
+          model: "provider/model",
+          thinking: "medium",
+          source: "builtin",
+        },
+      }).agent,
+    ).not.toHaveProperty("definitionPath");
+
+    expect(() =>
+      decodeRunManifest({
+        ...manifest,
+        agent: { ...manifest.agent, source: "builtin" },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRunManifest({
+        ...manifest,
+        agent: { ...manifest.agent, definitionPath: undefined },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRunManifest({
+        ...manifest,
+        toolInheritance: {
+          ...manifest.toolInheritance,
+          effectiveToolNames: ["read"],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRunManifest({
+        ...manifest,
+        toolInheritance: {
+          ...manifest.toolInheritance,
+          effectiveToolNames: ["complete_subagent", "complete_subagent"],
+        },
+      }),
+    ).toThrow();
   });
 
   it("requires canonical UTC ISO timestamps for manifests and statuses", () => {

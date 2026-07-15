@@ -20,13 +20,6 @@ export class AgentDefinitionError extends Data.TaggedError(
   readonly agentName?: string;
 }> {}
 
-export class ToolProviderError extends Data.TaggedError("ToolProviderError")<{
-  readonly toolName: string;
-  readonly message: string;
-  readonly source?: string;
-  readonly providerPath?: string;
-}> {}
-
 export class InvalidWorkingDirectoryError extends Data.TaggedError(
   "InvalidWorkingDirectoryError",
 )<{
@@ -69,7 +62,6 @@ export class CompletionValidationError extends Data.TaggedError(
 export type SubagentError =
   | InvalidSubagentInput
   | AgentDefinitionError
-  | ToolProviderError
   | InvalidWorkingDirectoryError
   | RunStoreError
   | ChildProcessError
@@ -82,8 +74,6 @@ const primarySubject = (error: SubagentError): string | undefined => {
       return error.subject;
     case "AgentDefinitionError":
       return error.agentName ?? error.definitionPath;
-    case "ToolProviderError":
-      return error.toolName;
     case "InvalidWorkingDirectoryError":
       return error.cwd;
     case "RunStoreError":
