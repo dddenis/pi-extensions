@@ -1289,6 +1289,67 @@ describe("PiEventAccumulator", () => {
       }),
   );
 
+  it.effect(
+    "keeps a negatively disposed active retry malformed despite later recovery",
+    () =>
+      Effect.gen(function* () {
+        const accumulator = makePiEventAccumulator();
+        const completion = completionEvidence();
+        yield* consumeAll(accumulator, [
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "first provider error",
+          }),
+          agentEnd(true),
+          autoRetryStart(1, { errorMessage: "first provider error" }),
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "second provider error",
+          }),
+          agentEnd(false),
+        ]);
+
+        const replacement = yield* Effect.either(
+          accumulator.consume(
+            line(
+              assistantEnd({
+                calls: [],
+                stopReason: "error",
+                errorMessage: "third provider error",
+              }),
+            ),
+          ),
+        );
+        yield* Effect.forEach(
+          [
+            agentEnd(true),
+            autoRetryStart(2, { errorMessage: "third provider error" }),
+            completion.assistant,
+            autoRetryEnd(2, true),
+            completion.start,
+            completion.end,
+            agentEnd(false),
+            { type: "agent_settled" },
+          ],
+          (value) => Effect.either(accumulator.consume(line(value))),
+          { discard: true },
+        );
+
+        expect(Either.isLeft(replacement)).toBe(true);
+        if (Either.isLeft(replacement)) {
+          expect(replacement.left._tag).toBe("PiEventStreamError");
+        }
+        expect(
+          yield* accumulator.finalize({ code: 0, signal: null }),
+        ).toMatchObject({
+          status: "failed",
+          reason: "Pi event stream contains malformed events",
+        });
+      }),
+  );
+
   it.effect("rejects consecutive provider failures before disposition", () =>
     expectRejectedRetryEvidence(
       [

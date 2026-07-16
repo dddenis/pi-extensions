@@ -517,6 +517,14 @@ const recordProviderFailure = (
   ) {
     invalidRetryTransition("provider failure replaced before disposition");
   }
+  if (
+    state.activeRetry !== undefined &&
+    previousFailure?.terminalDisposition === true
+  ) {
+    invalidRetryTransition(
+      "provider failure replaced after active retry became terminal",
+    );
+  }
   if (state.activeRetry !== undefined) {
     state.activeRetry.failed = true;
   }
