@@ -1237,6 +1237,10 @@ describe("PiEventAccumulator", () => {
           { type: "agent_settled" },
         ]);
 
+        expect((yield* accumulator.snapshot).providerFailure).toEqual({
+          stopReason: "error",
+          message: "unretried provider failure",
+        });
         expect(
           yield* accumulator.finalize({ code: 0, signal: null }),
         ).toMatchObject({
@@ -1281,6 +1285,64 @@ describe("PiEventAccumulator", () => {
         ).toMatchObject({
           status: "failed",
           reason: "provider retry exhausted",
+        });
+      }),
+  );
+
+  it.effect("rejects consecutive provider failures before disposition", () =>
+    expectRejectedRetryEvidence(
+      [
+        assistantEnd({
+          calls: [],
+          stopReason: "error",
+          errorMessage: "first provider error",
+        }),
+      ],
+      assistantEnd({
+        calls: [],
+        stopReason: "error",
+        errorMessage: "second provider error",
+      }),
+    ),
+  );
+
+  it.effect(
+    "rejects duplicate negative disposition for one provider failure",
+    () => {
+      const failure = assistantEnd({
+        calls: [],
+        stopReason: "error",
+        errorMessage: "provider error",
+      });
+      return expectRejectedRetryEvidence(
+        [failure, agentEnd(false)],
+        agentEnd(false),
+      );
+    },
+  );
+
+  it.effect(
+    "accepts negative disposition after later distinct assistant work",
+    () =>
+      Effect.gen(function* () {
+        const accumulator = makePiEventAccumulator();
+        yield* consumeAll(accumulator, [
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "terminal provider error",
+          }),
+          agentEnd(false),
+          assistantEnd({ calls: [], stopReason: "stop" }),
+          agentEnd(false),
+          { type: "agent_settled" },
+        ]);
+
+        expect(
+          yield* accumulator.finalize({ code: 0, signal: null }),
+        ).toMatchObject({
+          status: "failed",
+          reason: "terminal provider error",
         });
       }),
   );

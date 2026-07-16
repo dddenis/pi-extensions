@@ -332,7 +332,7 @@ interface ProviderFailure {
 interface MutableProviderFailure extends ProviderFailure {
   readonly observedAtLine: number;
   retryAnnounced: boolean;
-  retryDeclined: boolean;
+  terminalDisposition: boolean;
 }
 
 interface ActiveRetry {
@@ -391,6 +391,8 @@ interface MutableAccumulatorState {
   streamFailed: boolean;
   providerFailure?: MutableProviderFailure;
   terminalProviderFailure?: ProviderFailure;
+  latestAssistantEndLine?: number;
+  agentEndObservedAtLine?: number;
   retryExpected: boolean;
   activeRetry?: ActiveRetry;
   lastRetryAttempt?: number;
@@ -398,28 +400,36 @@ interface MutableAccumulatorState {
   recoveredDiagnostics: Array<string>;
 }
 
+const authoritativeProviderFailure = (
+  state: MutableAccumulatorState,
+): ProviderFailure | undefined =>
+  state.terminalProviderFailure ?? state.providerFailure;
+
 const snapshotState = (
   state: MutableAccumulatorState,
-): PiEventAccumulatorSnapshot => ({
-  ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
-  usage: copyUsage(state.usage),
-  settled: state.settled,
-  ...(state.completion === undefined
-    ? {}
-    : { completion: copyCompletion(state.completion) }),
-  completionInvalidated: state.completionInvalidated,
-  ...(state.providerFailure === undefined
-    ? {}
-    : {
-        providerFailure: {
-          stopReason: state.providerFailure.stopReason,
-          ...(state.providerFailure.message === undefined
-            ? {}
-            : { message: state.providerFailure.message }),
-        },
-      }),
-  recoveredDiagnostics: [...state.recoveredDiagnostics],
-});
+): PiEventAccumulatorSnapshot => {
+  const providerFailure = authoritativeProviderFailure(state);
+  return {
+    ...(state.sessionId === undefined ? {} : { sessionId: state.sessionId }),
+    usage: copyUsage(state.usage),
+    settled: state.settled,
+    ...(state.completion === undefined
+      ? {}
+      : { completion: copyCompletion(state.completion) }),
+    completionInvalidated: state.completionInvalidated,
+    ...(providerFailure === undefined
+      ? {}
+      : {
+          providerFailure: {
+            stopReason: providerFailure.stopReason,
+            ...(providerFailure.message === undefined
+              ? {}
+              : { message: providerFailure.message }),
+          },
+        }),
+    recoveredDiagnostics: [...state.recoveredDiagnostics],
+  };
+};
 
 const invalidateCompletion = (state: MutableAccumulatorState): void => {
   state.pendingCompletion = undefined;
@@ -499,6 +509,14 @@ const recordProviderFailure = (
   if (state.retryExpected) {
     invalidRetryTransition("provider failure arrived before retry start");
   }
+  const previousFailure = state.providerFailure;
+  if (
+    state.activeRetry === undefined &&
+    previousFailure !== undefined &&
+    !previousFailure.terminalDisposition
+  ) {
+    invalidRetryTransition("provider failure replaced before disposition");
+  }
   if (state.activeRetry !== undefined) {
     state.activeRetry.failed = true;
   }
@@ -506,7 +524,7 @@ const recordProviderFailure = (
     ...failure,
     observedAtLine: state.lineNumber,
     retryAnnounced: false,
-    retryDeclined: false,
+    terminalDisposition: false,
   };
 };
 
@@ -517,9 +535,21 @@ const consumeAgentEnd = (
   if (state.retryExpected) {
     invalidRetryTransition("agent_end repeated before retry start");
   }
+  const assistantEndLine = state.latestAssistantEndLine;
+  if (
+    assistantEndLine === undefined ||
+    state.agentEndObservedAtLine === assistantEndLine
+  ) {
+    invalidRetryTransition("agent_end repeated without new assistant work");
+  }
+
+  const currentFailure = state.providerFailure;
+  const failure =
+    currentFailure?.observedAtLine === assistantEndLine
+      ? currentFailure
+      : undefined;
 
   if (!event.willRetry) {
-    const failure = state.providerFailure;
     if (state.activeRetry !== undefined) {
       if (
         !state.activeRetry.failed ||
@@ -532,20 +562,20 @@ const consumeAgentEnd = (
       }
     }
     if (failure !== undefined) {
-      failure.retryDeclined = true;
+      failure.terminalDisposition = true;
       if (state.activeRetry === undefined) {
         preserveTerminalProviderFailure(state, failure);
       }
     }
+    state.agentEndObservedAtLine = assistantEndLine;
     return;
   }
 
-  const failure = state.providerFailure;
   if (failure === undefined) {
     invalidRetryTransition("retry announced without provider failure");
   }
-  if (failure.retryDeclined) {
-    invalidRetryTransition("retry announced after retry was declined");
+  if (failure.terminalDisposition) {
+    invalidRetryTransition("retry announced after failure became terminal");
   }
   if (failure.retryAnnounced) {
     invalidRetryTransition("retry announced repeatedly for one failure");
@@ -562,6 +592,7 @@ const consumeAgentEnd = (
 
   failure.retryAnnounced = true;
   state.retryExpected = true;
+  state.agentEndObservedAtLine = assistantEndLine;
 };
 
 const consumeAutoRetryStart = (
@@ -643,6 +674,7 @@ const consumeAutoRetryEnd = (
       event.finalError === undefined
         ? failure
         : { ...failure, message: event.finalError };
+    terminalFailure.terminalDisposition = true;
     state.providerFailure = terminalFailure;
     preserveTerminalProviderFailure(state, terminalFailure);
   }
@@ -752,6 +784,7 @@ const consumeValue = (
       ) {
         state.pendingCompletion = { toolCallId: calls[0].id };
       }
+      state.latestAssistantEndLine = state.lineNumber;
       return { type: "usage", usage: copyUsage(state.usage) };
     }
     case "tool_execution_end": {
@@ -830,8 +863,7 @@ const finalizeState = (
       "Pi event stream contains malformed events",
     );
   }
-  const providerFailure =
-    state.terminalProviderFailure ?? state.providerFailure;
+  const providerFailure = authoritativeProviderFailure(state);
   if (providerFailure !== undefined) {
     return failedFinalization(
       state,
