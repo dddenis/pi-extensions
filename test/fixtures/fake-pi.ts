@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { GENERAL_AGENT_ROLE_PROMPT } from "../../src/subagents/general-agent";
 
@@ -181,6 +181,7 @@ const delay = delayValue === undefined ? 80 : Number(delayValue);
 if (
   ![
     "success",
+    "retry-success",
     "blocked",
     "missing-completion",
     "malformed",
@@ -336,9 +337,10 @@ const emitRunStart = (): void => {
 
 const assistantMessage = (
   content: ReadonlyArray<unknown>,
-  stopReason: "stop" | "toolUse",
+  stopReason: "stop" | "toolUse" | "error",
   timestamp: number,
   usage: typeof finalUsage,
+  errorMessage?: string,
 ) => ({
   role: "assistant",
   content,
@@ -348,12 +350,28 @@ const assistantMessage = (
   usage,
   stopReason,
   timestamp,
+  ...(errorMessage === undefined ? {} : { errorMessage }),
 });
 
-const emitCompletion = (status: "DONE" | "BLOCKED", summary: string): void => {
+interface CompletionOptions {
+  readonly reportPath?: string;
+  readonly afterAssistantEnd?: () => void;
+}
+
+const emitCompletion = (
+  status: "DONE" | "BLOCKED",
+  summary: string,
+  options: CompletionOptions = {},
+): void => {
   const assistantTimestamp = Date.now();
   const toolCallId = `complete-${id}`;
-  const argumentsValue = { status, summary };
+  const argumentsValue = {
+    status,
+    summary,
+    ...(options.reportPath === undefined
+      ? {}
+      : { reportPath: options.reportPath }),
+  };
   const toolCall = {
     type: "toolCall",
     id: toolCallId,
@@ -384,6 +402,7 @@ const emitCompletion = (status: "DONE" | "BLOCKED", summary: string): void => {
     },
   });
   emit({ type: "message_end", message: assistantEnd });
+  options.afterAssistantEnd?.();
   emit({
     type: "tool_execution_start",
     toolCallId,
@@ -394,7 +413,7 @@ const emitCompletion = (status: "DONE" | "BLOCKED", summary: string): void => {
     content: [
       { type: "text", text: `Subagent completion recorded: ${status}` },
     ],
-    details: { status, summary },
+    details: argumentsValue,
     terminate: true,
   };
   emit({
@@ -426,6 +445,51 @@ const emitCompletion = (status: "DONE" | "BLOCKED", summary: string): void => {
     willRetry: false,
   });
   emit({ type: "agent_settled" });
+};
+
+const emitRetrySuccess = (): void => {
+  const errorMessage = "WebSocket error";
+  const assistantTimestamp = Date.now();
+  const failedStart = assistantMessage(
+    [],
+    "error",
+    assistantTimestamp,
+    emptyUsage,
+    errorMessage,
+  );
+  const failedEnd = assistantMessage(
+    [],
+    "error",
+    assistantTimestamp,
+    finalUsage,
+    errorMessage,
+  );
+  emit({ type: "message_start", message: failedStart });
+  emit({ type: "message_end", message: failedEnd });
+  emit({ type: "turn_end", message: failedEnd, toolResults: [] });
+  emit({
+    type: "agent_end",
+    messages: [userMessage, failedEnd],
+    willRetry: true,
+  });
+  emit({
+    type: "auto_retry_start",
+    attempt: 1,
+    maxAttempts: 3,
+    delayMs: 10,
+    errorMessage,
+  });
+
+  const reportPath = path.join(runDirectory, "retry-report.md");
+  writeFileSync(reportPath, `# Retry report\n\nRecovered fake child ${id}.\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  emitCompletion("DONE", `Fake Pi recovered ${id}`, {
+    reportPath,
+    afterAssistantEnd: () =>
+      emit({ type: "auto_retry_end", success: true, attempt: 1 }),
+  });
 };
 
 const emitMissingCompletion = (): void => {
@@ -479,6 +543,9 @@ const finish = async (): Promise<void> => {
     case "success":
     case "launch-delay":
       emitCompletion("DONE", `Fake Pi completed ${id}`);
+      break;
+    case "retry-success":
+      emitRetrySuccess();
       break;
     case "retained-output": {
       emitCompletion("DONE", `Fake Pi completed ${id}`);

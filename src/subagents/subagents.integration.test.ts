@@ -21,6 +21,11 @@ import {
 } from "../services/process";
 import { SubagentBatch } from "./batch";
 import type { ModelResolutionPort, ParentSnapshot } from "./preflight";
+import {
+  formatModelResult,
+  renderSubagentResult,
+  type RenderTheme,
+} from "./render";
 import { RunExecutor, type RunExecutorConfig } from "./run-executor";
 import { RunStore } from "./run-store";
 import {
@@ -37,6 +42,11 @@ const fixturePath = fileURLToPath(
 const inheritedToolProviderPath = fileURLToPath(
   new URL("../../test/fixtures/inherited-tool-provider.ts", import.meta.url),
 );
+
+const renderTheme: RenderTheme = {
+  bold: (text) => text,
+  fg: (_color, text) => text,
+};
 
 interface ExecutableSelection {
   readonly command: string;
@@ -796,6 +806,150 @@ describe("subagents credential-free real-process integration", () => {
           });
           expect(typeof validation?.identity).toBe("string");
           expect(typeof validation?.pid).toBe("number");
+        }),
+      ),
+  );
+
+  it.effect(
+    "recovers a provider retry through JSONL durable status and ordered rendering",
+    () =>
+      runTest((sandbox) =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystemService;
+          const [result] = yield* execute(
+            { tasks: [task("alpha", "retry-success", "retry-ok", 0)] },
+            sandbox,
+          );
+          expect(result).toBeDefined();
+          if (result === undefined) return;
+
+          const diagnostic =
+            "Recovered provider retry attempt 1: WebSocket error";
+          const reportPath = path.join(
+            result.artifacts.runDirectory,
+            "retry-report.md",
+          );
+          expect(result).toMatchObject({
+            agent: "alpha",
+            status: "DONE",
+            summary: "Fake Pi recovered retry-ok",
+            reportPath,
+            exitCode: 0,
+            signal: null,
+            diagnostics: [diagnostic],
+          });
+          expect(yield* fileSystem.readTextFile(reportPath)).toContain(
+            "Recovered fake child retry-ok",
+          );
+
+          const persisted = decodeRunStatusRecordJson(
+            yield* fileSystem.readTextFile(result.artifacts.statusPath),
+          );
+          expect(persisted).toMatchObject({
+            status: "DONE",
+            summary: "Fake Pi recovered retry-ok",
+            reportPath,
+            diagnostics: [diagnostic],
+          });
+
+          const rawEvents = yield* fileSystem.readTextFile(
+            result.artifacts.eventsPath,
+          );
+          const events = parseJsonLines(rawEvents);
+          expect(
+            events.map((event) =>
+              isJsonObject(event) && typeof event.type === "string"
+                ? event.type
+                : "invalid",
+            ),
+          ).toEqual([
+            "session",
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "message_start",
+            "message_end",
+            "turn_end",
+            "agent_end",
+            "auto_retry_start",
+            "message_start",
+            "message_update",
+            "message_end",
+            "auto_retry_end",
+            "tool_execution_start",
+            "tool_execution_end",
+            "message_start",
+            "message_end",
+            "turn_end",
+            "agent_end",
+            "agent_settled",
+          ]);
+          expect(messageObject(eventObject(events, 6))).toMatchObject({
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "WebSocket error",
+          });
+          expect(eventObject(events, 8)).toMatchObject({
+            type: "agent_end",
+            willRetry: true,
+          });
+          expect(eventObject(events, 9)).toEqual({
+            type: "auto_retry_start",
+            attempt: 1,
+            maxAttempts: 3,
+            delayMs: 10,
+            errorMessage: "WebSocket error",
+          });
+          expect(eventObject(events, 13)).toEqual({
+            type: "auto_retry_end",
+            success: true,
+            attempt: 1,
+          });
+          expect(eventObject(events, 19)).toMatchObject({
+            type: "agent_end",
+            willRetry: false,
+          });
+          expect(eventObject(events, 20)).toEqual({
+            type: "agent_settled",
+          });
+          expect(rawEvents).toContain('"errorMessage":"WebSocket error"');
+
+          const modelText = formatModelResult([result]);
+          const collapsed = renderSubagentResult(
+            {
+              content: [{ type: "text", text: modelText }],
+              details: {
+                phase: "complete",
+                results: [result],
+                diagnostics: [],
+              },
+            },
+            { expanded: false, isPartial: false },
+            renderTheme,
+          )
+            .render(200)
+            .join("\n");
+          const expanded = renderSubagentResult(
+            {
+              content: [{ type: "text", text: modelText }],
+              details: {
+                phase: "complete",
+                results: [result],
+                diagnostics: [],
+              },
+            },
+            { expanded: true, isPartial: false },
+            renderTheme,
+          )
+            .render(200)
+            .join("\n");
+
+          expect(modelText).toContain("DONE: Fake Pi recovered retry-ok");
+          expect(modelText).toContain(reportPath);
+          expect(modelText).not.toContain("WebSocket error");
+          expect(collapsed).not.toContain("WebSocket error");
+          expect(expanded).toContain(`diagnostic: ${diagnostic}`);
         }),
       ),
   );
