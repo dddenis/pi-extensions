@@ -1229,6 +1229,11 @@ describe("PiEventAccumulator", () => {
           invalid: autoRetryStart(1),
         },
         {
+          name: "retry announced after retry was declined",
+          before: [initialFailure, agentEnd(false)],
+          invalid: agentEnd(true),
+        },
+        {
           name: "retry end without an active attempt",
           before: [initialFailure, agentEnd(true)],
           invalid: autoRetryEnd(1, true),

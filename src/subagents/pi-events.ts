@@ -332,6 +332,7 @@ interface ProviderFailure {
 interface MutableProviderFailure extends ProviderFailure {
   readonly observedAtLine: number;
   retryAnnounced: boolean;
+  retryDeclined: boolean;
 }
 
 interface ActiveRetry {
@@ -493,6 +494,7 @@ const recordProviderFailure = (
     ...failure,
     observedAtLine: state.lineNumber,
     retryAnnounced: false,
+    retryDeclined: false,
   };
 };
 
@@ -505,8 +507,8 @@ const consumeAgentEnd = (
   }
 
   if (!event.willRetry) {
+    const failure = state.providerFailure;
     if (state.activeRetry !== undefined) {
-      const failure = state.providerFailure;
       if (
         !state.activeRetry.failed ||
         failure === undefined ||
@@ -517,12 +519,16 @@ const consumeAgentEnd = (
         );
       }
     }
+    if (failure !== undefined) failure.retryDeclined = true;
     return;
   }
 
   const failure = state.providerFailure;
   if (failure === undefined) {
     invalidRetryTransition("retry announced without provider failure");
+  }
+  if (failure.retryDeclined) {
+    invalidRetryTransition("retry announced after retry was declined");
   }
   if (failure.retryAnnounced) {
     invalidRetryTransition("retry announced repeatedly for one failure");
