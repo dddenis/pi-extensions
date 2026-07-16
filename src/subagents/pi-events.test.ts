@@ -90,17 +90,107 @@ const completionEnd = (
   isError: options?.isError ?? false,
 });
 
-const validCompletion = (id = "completion-1") => [
-  assistantEnd({ calls: [{ id, name: "complete_subagent" }] }),
-  {
+const completionEvidence = (id = "completion-1") => ({
+  assistant: assistantEnd({
+    calls: [{ id, name: "complete_subagent" }],
+  }),
+  start: {
     type: "tool_execution_start",
     toolCallId: id,
     toolName: "complete_subagent",
     args: { status: "DONE" },
   },
-  completionEnd(id),
-  { type: "agent_settled" },
-];
+  end: completionEnd(id),
+});
+
+const validCompletion = (id = "completion-1") => {
+  const completion = completionEvidence(id);
+  return [
+    completion.assistant,
+    completion.start,
+    completion.end,
+    { type: "agent_settled" },
+  ];
+};
+
+const agentEnd = (
+  willRetry: boolean,
+  messages: ReadonlyArray<unknown> = [],
+) => ({
+  type: "agent_end",
+  messages,
+  willRetry,
+});
+
+const autoRetryStart = (
+  attempt: number,
+  options: {
+    readonly maxAttempts?: number;
+    readonly delayMs?: number;
+    readonly errorMessage?: string;
+  } = {},
+) => ({
+  type: "auto_retry_start",
+  attempt,
+  maxAttempts: options.maxAttempts ?? 3,
+  delayMs: options.delayMs ?? 10,
+  errorMessage: options.errorMessage ?? "WebSocket error",
+});
+
+const autoRetryEnd = (
+  attempt: number,
+  success: boolean,
+  finalError?: string,
+) => ({
+  type: "auto_retry_end",
+  success,
+  attempt,
+  ...(finalError === undefined ? {} : { finalError }),
+});
+
+const recoveredCompletion = (
+  options: {
+    readonly stopReason?: "error" | "aborted";
+    readonly errorMessage?: string;
+    readonly attempt?: number;
+  } = {},
+) => {
+  const stopReason = options.stopReason ?? "error";
+  const errorMessage = options.errorMessage ?? "WebSocket error";
+  const attempt = options.attempt ?? 1;
+  const completion = completionEvidence();
+  return [
+    assistantEnd({ calls: [], stopReason, errorMessage }),
+    agentEnd(true),
+    autoRetryStart(attempt, { errorMessage }),
+    completion.assistant,
+    autoRetryEnd(attempt, true),
+    completion.start,
+    completion.end,
+    agentEnd(false),
+    { type: "agent_settled" },
+  ];
+};
+
+const expectRejectedRetryEvidence = (
+  before: ReadonlyArray<unknown>,
+  invalid: unknown,
+) =>
+  Effect.gen(function* () {
+    const accumulator = makePiEventAccumulator();
+    yield* consumeAll(accumulator, before);
+    const rejected = yield* Effect.either(accumulator.consume(line(invalid)));
+    expect(Either.isLeft(rejected)).toBe(true);
+    if (Either.isLeft(rejected)) {
+      expect(rejected.left._tag).toBe("PiEventStreamError");
+    }
+    expect(
+      yield* accumulator.finalize({ code: 0, signal: null }),
+    ).toMatchObject({
+      status: "failed",
+      reason: "Pi event stream contains malformed events",
+    });
+  });
 
 const consumeAll = (
   accumulator: ReturnType<typeof makePiEventAccumulator>,
@@ -893,30 +983,332 @@ describe("PiEventAccumulator", () => {
     }),
   );
 
-  for (const stopReason of ["error", "aborted"] as const) {
-    it.effect(`fails on provider ${stopReason} with exit code zero`, () =>
+  it.effect("completes after an explicitly successful provider retry", () =>
+    Effect.gen(function* () {
+      const accumulator = makePiEventAccumulator();
+      yield* consumeAll(accumulator, recoveredCompletion());
+
+      const snapshot = yield* accumulator.snapshot;
+      expect(snapshot.providerFailure).toBeUndefined();
+      expect(snapshot.recoveredDiagnostics).toEqual([
+        "Recovered provider retry attempt 1: WebSocket error",
+      ]);
+      expect(
+        yield* accumulator.finalize({ code: 0, signal: null }),
+      ).toMatchObject({
+        status: "completed",
+        completion: {
+          status: "DONE",
+          summary: "Implemented parser",
+          reportPath: "/tmp/report.md",
+        },
+      });
+    }),
+  );
+
+  it.effect(
+    "retains recovered errors only as bounded terminal-safe diagnostics",
+    () =>
       Effect.gen(function* () {
         const accumulator = makePiEventAccumulator();
-        yield* accumulator.consume(
-          line(
+        const unsafe =
+          "WebSocket \u001b]52;c;SECRET\u0007 error\n" + "detail ".repeat(100);
+        yield* consumeAll(
+          accumulator,
+          recoveredCompletion({ errorMessage: unsafe }),
+        );
+
+        const diagnostic = (yield* accumulator.snapshot)
+          .recoveredDiagnostics[0];
+        expect(diagnostic).toBeDefined();
+        if (diagnostic === undefined) return;
+        expect(Array.from(diagnostic).length).toBeLessThanOrEqual(500);
+        expect(diagnostic).not.toContain("SECRET");
+        expect(diagnostic).not.toMatch(/[\r\n\u001b\u0007]/u);
+        expect(diagnostic).toContain("Recovered provider retry attempt 1");
+      }),
+  );
+
+  it.effect("accepts increasing retry attempts before eventual recovery", () =>
+    Effect.gen(function* () {
+      const accumulator = makePiEventAccumulator();
+      const completion = completionEvidence();
+      yield* consumeAll(accumulator, [
+        assistantEnd({
+          calls: [],
+          stopReason: "error",
+          errorMessage: "first provider error",
+        }),
+        agentEnd(true),
+        autoRetryStart(1, { errorMessage: "first provider error" }),
+        assistantEnd({
+          calls: [],
+          stopReason: "error",
+          errorMessage: "second provider error",
+        }),
+        agentEnd(true),
+        autoRetryStart(2, { errorMessage: "second provider error" }),
+        completion.assistant,
+        autoRetryEnd(2, true),
+        completion.start,
+        completion.end,
+        agentEnd(false),
+        { type: "agent_settled" },
+      ]);
+
+      expect(
+        yield* accumulator.finalize({ code: 0, signal: null }),
+      ).toMatchObject({ status: "completed" });
+      expect((yield* accumulator.snapshot).recoveredDiagnostics).toEqual([
+        "Recovered provider retry attempt 2: second provider error",
+      ]);
+    }),
+  );
+
+  it.effect(
+    "recovers an aborted provider stop only through the explicit retry lifecycle",
+    () =>
+      Effect.gen(function* () {
+        const accumulator = makePiEventAccumulator();
+        yield* consumeAll(
+          accumulator,
+          recoveredCompletion({
+            stopReason: "aborted",
+            errorMessage: "provider aborted",
+          }),
+        );
+
+        expect(
+          yield* accumulator.finalize({ code: 0, signal: null }),
+        ).toMatchObject({ status: "completed" });
+        expect((yield* accumulator.snapshot).recoveredDiagnostics).toEqual([
+          "Recovered provider retry attempt 1: provider aborted",
+        ]);
+      }),
+  );
+
+  for (const stopReason of ["error", "aborted"] as const) {
+    it.effect(
+      `fails on unretried provider ${stopReason} with exit code zero`,
+      () =>
+        Effect.gen(function* () {
+          const accumulator = makePiEventAccumulator();
+          yield* consumeAll(accumulator, [
             assistantEnd({
               calls: [],
               stopReason,
               errorMessage: `provider ${stopReason}`,
             }),
-          ),
-        );
-        yield* accumulator.consume(line({ type: "agent_settled" }));
+            agentEnd(false),
+            { type: "agent_settled" },
+          ]);
 
-        expect(
-          yield* accumulator.finalize({ code: 0, signal: null }),
-        ).toMatchObject({
-          status: "failed",
-          reason: `provider ${stopReason}`,
-        });
-      }),
+          expect(
+            yield* accumulator.finalize({ code: 0, signal: null }),
+          ).toMatchObject({
+            status: "failed",
+            reason: `provider ${stopReason}`,
+          });
+        }),
     );
   }
+
+  it.effect("keeps retry exhaustion terminal with the final error", () =>
+    Effect.gen(function* () {
+      const accumulator = makePiEventAccumulator();
+      yield* consumeAll(accumulator, [
+        assistantEnd({
+          calls: [],
+          stopReason: "error",
+          errorMessage: "first provider error",
+        }),
+        agentEnd(true),
+        autoRetryStart(1, {
+          maxAttempts: 1,
+          errorMessage: "first provider error",
+        }),
+        assistantEnd({
+          calls: [],
+          stopReason: "error",
+          errorMessage: "last provider response",
+        }),
+        agentEnd(false),
+        autoRetryEnd(1, false, "provider retry exhausted"),
+        { type: "agent_settled" },
+      ]);
+
+      expect(
+        yield* accumulator.finalize({ code: 0, signal: null }),
+      ).toMatchObject({
+        status: "failed",
+        reason: "provider retry exhausted",
+      });
+    }),
+  );
+
+  it.effect("keeps a cancelled retry terminal with its final error", () =>
+    Effect.gen(function* () {
+      const accumulator = makePiEventAccumulator();
+      yield* consumeAll(accumulator, [
+        assistantEnd({
+          calls: [],
+          stopReason: "error",
+          errorMessage: "WebSocket error",
+        }),
+        agentEnd(true),
+        autoRetryStart(1),
+        autoRetryEnd(1, false, "Retry cancelled"),
+        { type: "agent_settled" },
+      ]);
+
+      expect(
+        yield* accumulator.finalize({ code: 0, signal: null }),
+      ).toMatchObject({ status: "failed", reason: "Retry cancelled" });
+    }),
+  );
+
+  it.effect("rejects malformed recognized retry events permanently", () =>
+    Effect.forEach(
+      [
+        { type: "agent_end", messages: [] },
+        { type: "agent_end", messages: "invalid", willRetry: true },
+        {
+          type: "auto_retry_start",
+          attempt: 0,
+          maxAttempts: 3,
+          delayMs: 10,
+          errorMessage: "WebSocket error",
+        },
+        {
+          type: "auto_retry_start",
+          attempt: 1,
+          maxAttempts: 0,
+          delayMs: 10,
+          errorMessage: "WebSocket error",
+        },
+        {
+          type: "auto_retry_start",
+          attempt: 1,
+          maxAttempts: 3,
+          delayMs: -1,
+          errorMessage: "WebSocket error",
+        },
+        { type: "auto_retry_end", success: true, attempt: 0 },
+      ],
+      (invalid) => expectRejectedRetryEvidence([], invalid),
+      { discard: true },
+    ),
+  );
+
+  it.effect(
+    "rejects mismatched repeated contradictory and out-of-order retry transitions",
+    () => {
+      const initialFailure = assistantEnd({
+        calls: [],
+        stopReason: "error",
+        errorMessage: "WebSocket error",
+      });
+      const secondFailure = assistantEnd({
+        calls: [],
+        stopReason: "error",
+        errorMessage: "second provider error",
+      });
+      const cases: ReadonlyArray<{
+        readonly name: string;
+        readonly before: ReadonlyArray<unknown>;
+        readonly invalid: unknown;
+      }> = [
+        {
+          name: "retry announcement without failure",
+          before: [],
+          invalid: agentEnd(true),
+        },
+        {
+          name: "retry start without announcement",
+          before: [initialFailure],
+          invalid: autoRetryStart(1),
+        },
+        {
+          name: "retry end without an active attempt",
+          before: [initialFailure, agentEnd(true)],
+          invalid: autoRetryEnd(1, true),
+        },
+        {
+          name: "attempt sequence does not start at one",
+          before: [initialFailure, agentEnd(true)],
+          invalid: autoRetryStart(2),
+        },
+        {
+          name: "repeated retry start",
+          before: [initialFailure, agentEnd(true), autoRetryStart(1)],
+          invalid: autoRetryStart(1),
+        },
+        {
+          name: "repeated announcement for the same failure",
+          before: [initialFailure, agentEnd(true), autoRetryStart(1)],
+          invalid: agentEnd(true),
+        },
+        {
+          name: "mismatched retry end attempt",
+          before: [initialFailure, agentEnd(true), autoRetryStart(1)],
+          invalid: autoRetryEnd(2, true),
+        },
+        {
+          name: "changed maximum attempts inside one chain",
+          before: [
+            initialFailure,
+            agentEnd(true),
+            autoRetryStart(1),
+            secondFailure,
+            agentEnd(true),
+          ],
+          invalid: autoRetryStart(2, {
+            maxAttempts: 4,
+            errorMessage: "second provider error",
+          }),
+        },
+        {
+          name: "mismatched retry error message",
+          before: [initialFailure, agentEnd(true)],
+          invalid: autoRetryStart(1, { errorMessage: "different error" }),
+        },
+        {
+          name: "successful retry carrying finalError",
+          before: [initialFailure, agentEnd(true), autoRetryStart(1)],
+          invalid: autoRetryEnd(1, true, "contradictory"),
+        },
+        {
+          name: "successful retry after another provider failure",
+          before: [
+            initialFailure,
+            agentEnd(true),
+            autoRetryStart(1),
+            secondFailure,
+          ],
+          invalid: autoRetryEnd(1, true),
+        },
+        {
+          name: "settlement before announced retry start",
+          before: [initialFailure, agentEnd(true)],
+          invalid: { type: "agent_settled" },
+        },
+        {
+          name: "settlement while retry is active",
+          before: [initialFailure, agentEnd(true), autoRetryStart(1)],
+          invalid: { type: "agent_settled" },
+        },
+      ];
+
+      return Effect.forEach(
+        cases,
+        (testCase) =>
+          expectRejectedRetryEvidence(testCase.before, testCase.invalid).pipe(
+            Effect.withSpan(testCase.name),
+          ),
+        { discard: true },
+      );
+    },
+  );
 
   it.effect(
     "fails a completed stream when the process exit is unsuccessful",

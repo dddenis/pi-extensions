@@ -1,10 +1,12 @@
 import { Effect, Schema } from "effect";
 import { PiEventStreamError } from "./errors";
 import {
+  COMPLETION_SUMMARY_MAX_CODE_POINTS,
   type CompletionResult,
   CompletionResultSchema,
   type RunUsage,
 } from "./schemas";
+import { sanitizeTerminalText } from "./terminal-text";
 
 const SessionEventSchema = Schema.Struct({
   type: Schema.Literal("session"),
@@ -207,6 +209,29 @@ const ToolEndEventSchema = Schema.Struct({
   isError: Schema.Boolean,
 });
 
+const PositiveIntSchema = Schema.Int.pipe(Schema.positive());
+
+const AgentEndEventSchema = Schema.Struct({
+  type: Schema.Literal("agent_end"),
+  messages: Schema.Array(Schema.Unknown),
+  willRetry: Schema.Boolean,
+});
+
+const AutoRetryStartEventSchema = Schema.Struct({
+  type: Schema.Literal("auto_retry_start"),
+  attempt: PositiveIntSchema,
+  maxAttempts: PositiveIntSchema,
+  delayMs: Schema.NonNegativeInt,
+  errorMessage: Schema.String,
+});
+
+const AutoRetryEndEventSchema = Schema.Struct({
+  type: Schema.Literal("auto_retry_end"),
+  success: Schema.Boolean,
+  attempt: PositiveIntSchema,
+  finalError: Schema.optional(Schema.String),
+});
+
 const CompletionToolResultSchema = Schema.Struct({
   content: Schema.Tuple(
     Schema.Struct({
@@ -247,6 +272,11 @@ const decodeAssistantMessageEnd = Schema.decodeUnknownSync(
 );
 const decodeToolCall = Schema.decodeUnknownSync(ToolCallSchema);
 const decodeToolEnd = Schema.decodeUnknownSync(ToolEndEventSchema);
+const decodeAgentEnd = Schema.decodeUnknownSync(AgentEndEventSchema);
+const decodeAutoRetryStart = Schema.decodeUnknownSync(
+  AutoRetryStartEventSchema,
+);
+const decodeAutoRetryEnd = Schema.decodeUnknownSync(AutoRetryEndEventSchema);
 const decodeCompletionToolResult = Schema.decodeUnknownSync(
   CompletionToolResultSchema,
   { onExcessProperty: "error" },
@@ -294,16 +324,31 @@ export interface ProcessExitStatus {
   readonly signal: NodeJS.Signals | null;
 }
 
+interface ProviderFailure {
+  readonly stopReason: "error" | "aborted";
+  readonly message?: string;
+}
+
+interface MutableProviderFailure extends ProviderFailure {
+  readonly observedAtLine: number;
+  retryAnnounced: boolean;
+}
+
+interface ActiveRetry {
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly sourceFailureLine: number;
+  failed: boolean;
+}
+
 export interface PiEventAccumulatorSnapshot {
   readonly sessionId?: string;
   readonly usage: RunUsage;
   readonly settled: boolean;
   readonly completion?: CompletionResult;
   readonly completionInvalidated: boolean;
-  readonly providerFailure?: {
-    readonly stopReason: "error" | "aborted";
-    readonly message?: string;
-  };
+  readonly providerFailure?: ProviderFailure;
+  readonly recoveredDiagnostics: ReadonlyArray<string>;
 }
 
 export type PiEventFinalization =
@@ -343,10 +388,12 @@ interface MutableAccumulatorState {
   completion?: CompletionResult;
   completionInvalidated: boolean;
   streamFailed: boolean;
-  providerFailure?: {
-    readonly stopReason: "error" | "aborted";
-    readonly message?: string;
-  };
+  providerFailure?: MutableProviderFailure;
+  retryExpected: boolean;
+  activeRetry?: ActiveRetry;
+  lastRetryAttempt?: number;
+  retryMaxAttempts?: number;
+  recoveredDiagnostics: Array<string>;
 }
 
 const snapshotState = (
@@ -361,7 +408,15 @@ const snapshotState = (
   completionInvalidated: state.completionInvalidated,
   ...(state.providerFailure === undefined
     ? {}
-    : { providerFailure: { ...state.providerFailure } }),
+    : {
+        providerFailure: {
+          stopReason: state.providerFailure.stopReason,
+          ...(state.providerFailure.message === undefined
+            ? {}
+            : { message: state.providerFailure.message }),
+        },
+      }),
+  recoveredDiagnostics: [...state.recoveredDiagnostics],
 });
 
 const invalidateCompletion = (state: MutableAccumulatorState): void => {
@@ -400,6 +455,173 @@ const toolCalls = (
     calls.push(decodeToolCall(item));
   }
   return calls;
+};
+
+const invalidRetryTransition = (message: string): never => {
+  throw new Error(`Invalid Pi retry lifecycle: ${message}`);
+};
+
+const boundedDiagnostic = (value: string): string => {
+  const sanitized = sanitizeTerminalText(value).replace(/\s+/gu, " ").trim();
+  const nonEmpty = sanitized.length === 0 ? "Provider failure" : sanitized;
+  return Array.from(nonEmpty)
+    .slice(0, COMPLETION_SUMMARY_MAX_CODE_POINTS)
+    .join("");
+};
+
+const recoveredProviderDiagnostic = (
+  failure: ProviderFailure,
+  attempt: number,
+): string =>
+  boundedDiagnostic(
+    `Recovered provider retry attempt ${String(attempt)}: ${
+      failure.message ?? `Provider stopped with ${failure.stopReason}`
+    }`,
+  );
+
+const recordProviderFailure = (
+  state: MutableAccumulatorState,
+  failure: ProviderFailure,
+): void => {
+  if (state.retryExpected) {
+    invalidRetryTransition("provider failure arrived before retry start");
+  }
+  if (state.activeRetry !== undefined) {
+    state.activeRetry.failed = true;
+  }
+  state.providerFailure = {
+    ...failure,
+    observedAtLine: state.lineNumber,
+    retryAnnounced: false,
+  };
+};
+
+const consumeAgentEnd = (
+  state: MutableAccumulatorState,
+  event: Schema.Schema.Type<typeof AgentEndEventSchema>,
+): void => {
+  if (state.retryExpected) {
+    invalidRetryTransition("agent_end repeated before retry start");
+  }
+
+  if (!event.willRetry) {
+    if (state.activeRetry !== undefined) {
+      const failure = state.providerFailure;
+      if (
+        !state.activeRetry.failed ||
+        failure === undefined ||
+        failure.observedAtLine === state.activeRetry.sourceFailureLine
+      ) {
+        invalidRetryTransition(
+          "agent_end ended an active retry before its retry result",
+        );
+      }
+    }
+    return;
+  }
+
+  const failure = state.providerFailure;
+  if (failure === undefined) {
+    invalidRetryTransition("retry announced without provider failure");
+  }
+  if (failure.retryAnnounced) {
+    invalidRetryTransition("retry announced repeatedly for one failure");
+  }
+  if (state.activeRetry !== undefined) {
+    if (
+      !state.activeRetry.failed ||
+      failure.observedAtLine === state.activeRetry.sourceFailureLine
+    ) {
+      invalidRetryTransition("next retry announced without a new failure");
+    }
+    state.activeRetry = undefined;
+  }
+
+  failure.retryAnnounced = true;
+  state.retryExpected = true;
+};
+
+const consumeAutoRetryStart = (
+  state: MutableAccumulatorState,
+  event: Schema.Schema.Type<typeof AutoRetryStartEventSchema>,
+): void => {
+  const failure = state.providerFailure;
+  if (
+    !state.retryExpected ||
+    state.activeRetry !== undefined ||
+    failure === undefined ||
+    !failure.retryAnnounced
+  ) {
+    invalidRetryTransition("retry start has no matching announcement");
+  }
+  const expectedAttempt = (state.lastRetryAttempt ?? 0) + 1;
+  if (event.attempt !== expectedAttempt) {
+    invalidRetryTransition(
+      `retry attempt ${String(event.attempt)} did not follow ${String(
+        state.lastRetryAttempt ?? 0,
+      )}`,
+    );
+  }
+  if (event.attempt > event.maxAttempts) {
+    invalidRetryTransition("retry attempt exceeds maxAttempts");
+  }
+  if (
+    state.retryMaxAttempts !== undefined &&
+    state.retryMaxAttempts !== event.maxAttempts
+  ) {
+    invalidRetryTransition("maxAttempts changed inside one retry chain");
+  }
+  if (failure.message !== undefined && failure.message !== event.errorMessage) {
+    invalidRetryTransition("retry error does not match provider failure");
+  }
+  if (failure.message === undefined) {
+    state.providerFailure = { ...failure, message: event.errorMessage };
+  }
+
+  state.retryExpected = false;
+  state.lastRetryAttempt = event.attempt;
+  state.retryMaxAttempts = event.maxAttempts;
+  state.activeRetry = {
+    attempt: event.attempt,
+    maxAttempts: event.maxAttempts,
+    sourceFailureLine: failure.observedAtLine,
+    failed: false,
+  };
+};
+
+const consumeAutoRetryEnd = (
+  state: MutableAccumulatorState,
+  event: Schema.Schema.Type<typeof AutoRetryEndEventSchema>,
+): void => {
+  const active = state.activeRetry;
+  const failure = state.providerFailure;
+  if (
+    state.retryExpected ||
+    active === undefined ||
+    failure === undefined ||
+    event.attempt !== active.attempt
+  ) {
+    invalidRetryTransition("retry end does not match the active attempt");
+  }
+
+  if (event.success) {
+    if (active.failed) {
+      invalidRetryTransition("failed retry attempt reported success");
+    }
+    if (event.finalError !== undefined) {
+      invalidRetryTransition("successful retry included finalError");
+    }
+    state.recoveredDiagnostics.push(
+      recoveredProviderDiagnostic(failure, active.attempt),
+    );
+    state.providerFailure = undefined;
+  } else if (event.finalError !== undefined) {
+    state.providerFailure = { ...failure, message: event.finalError };
+  }
+
+  state.activeRetry = undefined;
+  state.lastRetryAttempt = undefined;
+  state.retryMaxAttempts = undefined;
 };
 
 const consumeValue = (
@@ -487,12 +709,12 @@ const consumeValue = (
         event.message.stopReason === "error" ||
         event.message.stopReason === "aborted"
       ) {
-        state.providerFailure = {
+        recordProviderFailure(state, {
           stopReason: event.message.stopReason,
           ...(event.message.errorMessage === undefined
             ? {}
             : { message: event.message.errorMessage }),
-        };
+        });
       }
       const calls = toolCalls(event.message.content);
       if (
@@ -525,8 +747,26 @@ const consumeValue = (
       state.completion = copyCompletion(result.details);
       return { type: "ignored" };
     }
+    case "agent_end": {
+      const event = decodeAgentEnd(value);
+      consumeAgentEnd(state, event);
+      return { type: "ignored" };
+    }
+    case "auto_retry_start": {
+      const event = decodeAutoRetryStart(value);
+      consumeAutoRetryStart(state, event);
+      return { type: "ignored" };
+    }
+    case "auto_retry_end": {
+      const event = decodeAutoRetryEnd(value);
+      consumeAutoRetryEnd(state, event);
+      return { type: "ignored" };
+    }
     case "agent_settled": {
       decodeAgentSettled(value);
+      if (state.retryExpected || state.activeRetry !== undefined) {
+        invalidRetryTransition("agent settled while retry remained pending");
+      }
       state.settled = true;
       return { type: "settled" };
     }
@@ -599,6 +839,8 @@ export const makePiEventAccumulator = (): PiEventAccumulator => {
     settled: false,
     completionInvalidated: false,
     streamFailed: false,
+    retryExpected: false,
+    recoveredDiagnostics: [],
   };
 
   return {
