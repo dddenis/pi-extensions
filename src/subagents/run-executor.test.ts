@@ -243,6 +243,37 @@ const completionEvents = (status = "DONE", summary = "Review complete") => [
   { type: "agent_settled" },
 ];
 
+const agentEnd = (willRetry: boolean) => ({
+  type: "agent_end",
+  messages: [],
+  willRetry,
+});
+
+const recoveredCompletionEvents = () => {
+  const completion = completionEvents();
+  const completionAssistant = completion[0];
+  const completionTail = completion.slice(1, -1);
+  return [
+    assistantEnd({
+      stopReason: "error",
+      errorMessage: "WebSocket error",
+    }),
+    agentEnd(true),
+    {
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 10,
+      errorMessage: "WebSocket error",
+    },
+    completionAssistant,
+    { type: "auto_retry_end", success: true, attempt: 1 },
+    ...completionTail,
+    agentEnd(false),
+    { type: "agent_settled" },
+  ];
+};
+
 const executorConfig: RunExecutorConfig = {
   completionEntrypoint: "/repo/src/subagents/index.ts",
   executableSelector: () => ({ command: "/compiled/pi", prefix: [] }),
@@ -607,6 +638,83 @@ describe("RunExecutor", () => {
           expect(JSON.stringify(snapshots)).not.toContain(resolvedTask.task);
           expect(JSON.stringify(snapshots)).not.toContain(
             resolvedTask.agent.rolePrompt,
+          );
+        }),
+      ).pipe(Effect.provide(executorLayer)),
+  );
+
+  it.effect(
+    "durably commits semantic completion with a recovered provider diagnostic",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const run = yield* makeFakeRun();
+          const process = yield* ProcessServiceTest;
+          const handle = yield* launchRun(run.store);
+
+          yield* process.emitLaunch(0);
+          yield* handle.launched;
+          yield* emitLines(process, 0, recoveredCompletionEvents());
+          yield* process.complete(0, { code: 0, signal: null });
+
+          const result = yield* handle.awaitResult;
+          const persisted = (yield* run.state).status;
+          expect(result).toMatchObject({
+            status: "DONE",
+            summary: "Review complete",
+            reportPath: "/tmp/report.md",
+            exitCode: 0,
+            signal: null,
+            diagnostics: [
+              "Recovered provider retry attempt 1: WebSocket error",
+            ],
+          });
+          expect(persisted).toMatchObject({
+            status: "DONE",
+            summary: "Review complete",
+            reportPath: "/tmp/report.md",
+            diagnostics: [
+              "Recovered provider retry attempt 1: WebSocket error",
+            ],
+          });
+          expect(() => decodeRunStatusRecord(persisted)).not.toThrow();
+        }),
+      ).pipe(Effect.provide(executorLayer)),
+  );
+
+  it.effect(
+    "retains recovered diagnostics when a later process failure wins",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const run = yield* makeFakeRun();
+          const process = yield* ProcessServiceTest;
+          const handle = yield* launchRun(run.store);
+
+          yield* process.emitLaunch(0);
+          yield* handle.launched;
+          yield* emitLines(process, 0, recoveredCompletionEvents());
+          yield* process.emitPostLaunchError(
+            0,
+            new ProcessError({
+              operation: "wait",
+              message: "late process failure",
+            }),
+          );
+          yield* process.complete(0, { code: 0, signal: null });
+
+          const result = yield* handle.awaitResult;
+          const persisted = (yield* run.state).status;
+          expect(result.status).toBe("FAILED");
+          expect(result.diagnostics).toContain(
+            "Recovered provider retry attempt 1: WebSocket error",
+          );
+          expect(result.diagnostics.join(" ")).toContain(
+            "late process failure",
+          );
+          expect(persisted.status).toBe("FAILED");
+          expect(persisted.diagnostics).toContain(
+            "Recovered provider retry attempt 1: WebSocket error",
           );
         }),
       ).pipe(Effect.provide(executorLayer)),

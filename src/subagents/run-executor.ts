@@ -555,7 +555,14 @@ const makeRunExecutor = Effect.gen(function* () {
             candidate: TerminalCandidate,
           ): Effect.Effect<RunResult, RunStoreError> =>
             Deferred.await(terminalGate).pipe(
-              Effect.zipRight(commitCandidate(task, run, candidate)),
+              Effect.zipRight(accumulator.snapshot),
+              Effect.flatMap((snapshot) =>
+                commitCandidate(
+                  task,
+                  run,
+                  withDiagnostics(candidate, snapshot.recoveredDiagnostics),
+                ),
+              ),
             );
 
           const execution: Effect.Effect<RunResult, SubagentError> = Effect.gen(
