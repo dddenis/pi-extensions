@@ -1066,6 +1066,48 @@ describe("PiEventAccumulator", () => {
   );
 
   it.effect(
+    "accepts a later independent retry chain after successful recovery",
+    () =>
+      Effect.gen(function* () {
+        const accumulator = makePiEventAccumulator();
+        const completion = completionEvidence();
+        yield* consumeAll(accumulator, [
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "first provider error",
+          }),
+          agentEnd(true),
+          autoRetryStart(1, { errorMessage: "first provider error" }),
+          assistantEnd({ calls: [], stopReason: "stop" }),
+          autoRetryEnd(1, true),
+          agentEnd(false),
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "second provider error",
+          }),
+          agentEnd(true),
+          autoRetryStart(1, { errorMessage: "second provider error" }),
+          completion.assistant,
+          autoRetryEnd(1, true),
+          completion.start,
+          completion.end,
+          agentEnd(false),
+          { type: "agent_settled" },
+        ]);
+
+        expect(
+          yield* accumulator.finalize({ code: 0, signal: null }),
+        ).toMatchObject({ status: "completed" });
+        expect((yield* accumulator.snapshot).recoveredDiagnostics).toEqual([
+          "Recovered provider retry attempt 1: first provider error",
+          "Recovered provider retry attempt 1: second provider error",
+        ]);
+      }),
+  );
+
+  it.effect(
     "recovers an aborted provider stop only through the explicit retry lifecycle",
     () =>
       Effect.gen(function* () {
@@ -1165,6 +1207,82 @@ describe("PiEventAccumulator", () => {
         yield* accumulator.finalize({ code: 0, signal: null }),
       ).toMatchObject({ status: "failed", reason: "Retry cancelled" });
     }),
+  );
+
+  it.effect(
+    "keeps an unretried failure terminal after a later provider recovery",
+    () =>
+      Effect.gen(function* () {
+        const accumulator = makePiEventAccumulator();
+        const completion = completionEvidence();
+        yield* consumeAll(accumulator, [
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "unretried provider failure",
+          }),
+          agentEnd(false),
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "later provider error",
+          }),
+          agentEnd(true),
+          autoRetryStart(1, { errorMessage: "later provider error" }),
+          completion.assistant,
+          autoRetryEnd(1, true),
+          completion.start,
+          completion.end,
+          agentEnd(false),
+          { type: "agent_settled" },
+        ]);
+
+        expect(
+          yield* accumulator.finalize({ code: 0, signal: null }),
+        ).toMatchObject({
+          status: "failed",
+          reason: "unretried provider failure",
+        });
+      }),
+  );
+
+  it.effect(
+    "keeps an exhausted retry terminal after a later provider recovery",
+    () =>
+      Effect.gen(function* () {
+        const accumulator = makePiEventAccumulator();
+        const completion = completionEvidence();
+        yield* consumeAll(accumulator, [
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "first provider error",
+          }),
+          agentEnd(true),
+          autoRetryStart(1, { errorMessage: "first provider error" }),
+          autoRetryEnd(1, false, "provider retry exhausted"),
+          assistantEnd({
+            calls: [],
+            stopReason: "error",
+            errorMessage: "later provider error",
+          }),
+          agentEnd(true),
+          autoRetryStart(1, { errorMessage: "later provider error" }),
+          completion.assistant,
+          autoRetryEnd(1, true),
+          completion.start,
+          completion.end,
+          agentEnd(false),
+          { type: "agent_settled" },
+        ]);
+
+        expect(
+          yield* accumulator.finalize({ code: 0, signal: null }),
+        ).toMatchObject({
+          status: "failed",
+          reason: "provider retry exhausted",
+        });
+      }),
   );
 
   it.effect("rejects malformed recognized retry events permanently", () =>

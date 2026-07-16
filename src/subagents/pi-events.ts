@@ -390,6 +390,7 @@ interface MutableAccumulatorState {
   completionInvalidated: boolean;
   streamFailed: boolean;
   providerFailure?: MutableProviderFailure;
+  terminalProviderFailure?: ProviderFailure;
   retryExpected: boolean;
   activeRetry?: ActiveRetry;
   lastRetryAttempt?: number;
@@ -480,6 +481,17 @@ const recoveredProviderDiagnostic = (
     }`,
   );
 
+const preserveTerminalProviderFailure = (
+  state: MutableAccumulatorState,
+  failure: ProviderFailure,
+): void => {
+  if (state.terminalProviderFailure !== undefined) return;
+  state.terminalProviderFailure = {
+    stopReason: failure.stopReason,
+    ...(failure.message === undefined ? {} : { message: failure.message }),
+  };
+};
+
 const recordProviderFailure = (
   state: MutableAccumulatorState,
   failure: ProviderFailure,
@@ -519,7 +531,12 @@ const consumeAgentEnd = (
         );
       }
     }
-    if (failure !== undefined) failure.retryDeclined = true;
+    if (failure !== undefined) {
+      failure.retryDeclined = true;
+      if (state.activeRetry === undefined) {
+        preserveTerminalProviderFailure(state, failure);
+      }
+    }
     return;
   }
 
@@ -621,8 +638,13 @@ const consumeAutoRetryEnd = (
       recoveredProviderDiagnostic(failure, active.attempt),
     );
     state.providerFailure = undefined;
-  } else if (event.finalError !== undefined) {
-    state.providerFailure = { ...failure, message: event.finalError };
+  } else {
+    const terminalFailure =
+      event.finalError === undefined
+        ? failure
+        : { ...failure, message: event.finalError };
+    state.providerFailure = terminalFailure;
+    preserveTerminalProviderFailure(state, terminalFailure);
   }
 
   state.activeRetry = undefined;
@@ -808,11 +830,13 @@ const finalizeState = (
       "Pi event stream contains malformed events",
     );
   }
-  if (state.providerFailure !== undefined) {
+  const providerFailure =
+    state.terminalProviderFailure ?? state.providerFailure;
+  if (providerFailure !== undefined) {
     return failedFinalization(
       state,
-      state.providerFailure.message ??
-        `Provider stopped with ${state.providerFailure.stopReason}`,
+      providerFailure.message ??
+        `Provider stopped with ${providerFailure.stopReason}`,
     );
   }
   if (!state.settled) {
