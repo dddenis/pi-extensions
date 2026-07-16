@@ -1024,7 +1024,10 @@ describe("PiEventAccumulator", () => {
         if (diagnostic === undefined) return;
         expect(Array.from(diagnostic).length).toBeLessThanOrEqual(500);
         expect(diagnostic).not.toContain("SECRET");
-        expect(diagnostic).not.toMatch(/[\r\n\u001b\u0007]/u);
+        expect(diagnostic).not.toContain("\r");
+        expect(diagnostic).not.toContain("\n");
+        expect(diagnostic).not.toContain("\u001b");
+        expect(diagnostic).not.toContain("\u0007");
         expect(diagnostic).toContain("Recovered provider retry attempt 1");
       }),
   );

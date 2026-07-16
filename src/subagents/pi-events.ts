@@ -580,7 +580,9 @@ const consumeAgentEnd = (
   }
 
   if (failure === undefined) {
-    invalidRetryTransition("retry announced without provider failure");
+    throw new Error(
+      "Invalid Pi retry lifecycle: retry announced without provider failure",
+    );
   }
   if (failure.terminalDisposition) {
     invalidRetryTransition("retry announced after failure became terminal");
@@ -614,7 +616,9 @@ const consumeAutoRetryStart = (
     failure === undefined ||
     !failure.retryAnnounced
   ) {
-    invalidRetryTransition("retry start has no matching announcement");
+    throw new Error(
+      "Invalid Pi retry lifecycle: retry start has no matching announcement",
+    );
   }
   const expectedAttempt = (state.lastRetryAttempt ?? 0) + 1;
   if (event.attempt !== expectedAttempt) {
@@ -663,7 +667,9 @@ const consumeAutoRetryEnd = (
     failure === undefined ||
     event.attempt !== active.attempt
   ) {
-    invalidRetryTransition("retry end does not match the active attempt");
+    throw new Error(
+      "Invalid Pi retry lifecycle: retry end does not match the active attempt",
+    );
   }
 
   if (event.success) {
