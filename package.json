@@ -7,7 +7,8 @@
     "extensions": [
       "./src/attention-hooks/index.ts",
       "./src/custom-footer/index.ts",
-      "./src/history-picker/index.ts"
+      "./src/history-picker/index.ts",
+      "./src/subagents/index.ts"
     ]
   },
   "scripts": {

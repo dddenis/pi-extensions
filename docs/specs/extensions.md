@@ -19,6 +19,7 @@ When `<agent-dir>/extensions` has an immutable or declaratively managed parent, 
 - [Attention hooks](./attention-hooks.md) provides audio notifications for settled runs and subagent attention.
 - [Custom footer](./custom-footer.md) provides the interactive TUI footer and OpenAI limit status.
 - [History picker](./history-picker.md) provides interactive search across current and saved user messages.
+- [Subagents](./subagents.md) provides isolated, bounded Pi child execution for delegated coding tasks.
 
 ## Runtime Dependencies
 
@@ -28,4 +29,4 @@ Third-party packages imported by extension runtime code belong in `dependencies`
 
 ## Validation
 
-Extension changes pass `bun run check`, including the [attention-hooks](./attention-hooks.md), [custom-footer](./custom-footer.md), and [history-picker](./history-picker.md) feature contracts. Global linking and unlinking are validated in an isolated agent directory. Global loading is validated by linking the package, confirming the symlink target, reloading Pi, and confirming that the configured extension entrypoints load successfully.
+Extension changes pass `bun run check`, including the [attention-hooks](./attention-hooks.md), [custom-footer](./custom-footer.md), [history-picker](./history-picker.md), and [subagents](./subagents.md) feature contracts. Global linking and unlinking are validated in an isolated agent directory. Global loading is validated by linking the package, confirming the symlink target, reloading Pi, and confirming that the configured extension entrypoints load successfully.

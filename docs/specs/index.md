@@ -13,6 +13,7 @@ This directory contains checked-in contracts for the `pi-extensions` repository.
 - [Test Services](./test-services.md) — reusable Effect test-service contracts.
 - [Attention Hooks](./attention-hooks.md) — settled-run and subagent-attention audio notifications, suppression, path resolution, and lifecycle cleanup.
 - [History Picker](./history-picker.md) — Ctrl+R interaction, saved-session indexing/cache semantics, fuzzy search, scrolling, and lifecycle cleanup.
+- [Subagents](./subagents.md) — isolated Pi child execution, concurrency, progress, bounded results, and cancellation.
 
 ## Change Rules
 
