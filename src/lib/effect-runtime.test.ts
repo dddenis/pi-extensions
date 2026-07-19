@@ -38,4 +38,31 @@ describe("makeEffectRunner", () => {
     await Promise.all([firstDispose, secondDispose]);
     expect(releases).toBe(1);
   });
+
+  it("forwards AbortSignal and runs interruption finalizers", async () => {
+    const runner = makeEffectRunner(Layer.empty);
+    const started = Promise.withResolvers<void>();
+    let finalizations = 0;
+    const controller = new AbortController();
+
+    const running = runner.runPromise(
+      Effect.sync(() => started.resolve()).pipe(
+        Effect.zipRight(Effect.sleep("50 millis")),
+        Effect.as("finished"),
+        Effect.ensuring(
+          Effect.sync(() => {
+            finalizations += 1;
+          }),
+        ),
+      ),
+      { signal: controller.signal },
+    );
+
+    await started.promise;
+    controller.abort();
+
+    await expect(running).rejects.toThrow();
+    expect(finalizations).toBe(1);
+    await runner.dispose();
+  });
 });
