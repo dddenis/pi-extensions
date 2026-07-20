@@ -145,8 +145,8 @@ const executeTask = (
       SUBAGENT_SHUTDOWN_POLICY,
     );
     const stdoutFiber = yield* Effect.forkScoped(
-      Stream.runForEach(child.stdoutLines, (line) =>
-        Effect.sync(() => stdout.append(line + "\n")),
+      Stream.runForEach(child.stdoutChunks, (chunk) =>
+        Effect.sync(() => stdout.append(chunk)),
       ).pipe(observeProcess),
     );
     const stderrFiber = yield* Effect.forkScoped(

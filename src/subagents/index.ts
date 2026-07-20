@@ -5,7 +5,14 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Context, Effect, Fiber, Layer, Scope } from "effect";
+import {
+  Context,
+  Effect,
+  ExecutionStrategy,
+  Fiber,
+  Layer,
+  Scope,
+} from "effect";
 import { makeEffectRunner } from "../lib/effect-runtime";
 import { ProcessService } from "../services/process";
 import {
@@ -64,7 +71,7 @@ export const SubagentRuntimeStateLive = Layer.scoped(
   SubagentRuntimeState,
   Effect.gen(function* () {
     const semaphore = yield* Effect.makeSemaphore(3);
-    const workScope = yield* Scope.make();
+    const workScope = yield* Scope.make(ExecutionStrategy.parallel);
     yield* Effect.addFinalizer((exit) => Scope.close(workScope, exit));
     return { semaphore, workScope };
   }),

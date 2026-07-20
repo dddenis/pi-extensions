@@ -158,6 +158,138 @@ describe("ProcessService.Live", () => {
     }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
   });
 
+  it.effect("decodes UTF-8 code points split across output chunks", () => {
+    const events = new EventEmitter();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(events, {
+      stdin: null,
+      stdout,
+      stderr,
+      kill: () => true,
+      unref: () => undefined,
+    });
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const spawned = yield* processes.spawnScoped(
+        "split-utf8",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      const capturedStdout = yield* Effect.fork(collect(spawned.stdoutChunks));
+      const capturedStderr = yield* Effect.fork(collect(spawned.stderrChunks));
+      const encoded = Buffer.from("A€B", "utf8");
+      const incompleteTrailingCodePoint = Buffer.from([0xe2]);
+
+      stdout.write(encoded.subarray(0, 2));
+      stdout.write(encoded.subarray(2, 3));
+      stdout.end(
+        Buffer.concat([encoded.subarray(3), incompleteTrailingCodePoint]),
+      );
+      stderr.write(encoded.subarray(0, 2));
+      stderr.write(encoded.subarray(2, 3));
+      stderr.end(
+        Buffer.concat([encoded.subarray(3), incompleteTrailingCodePoint]),
+      );
+      events.emit("exit", 0, null);
+
+      expect((yield* Fiber.join(capturedStdout)).join("")).toBe("A€B�");
+      expect((yield* Fiber.join(capturedStderr)).join("")).toBe("A€B�");
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
+  it.effect(
+    "delivers large newline-free stdout before the process exits",
+    () => {
+      const script = [
+        `process.stdout.write("x".repeat(${String(2 * 1_024 * 1_024)}))`,
+        'process.stderr.write("ready")',
+        "setInterval(() => undefined, 1_000)",
+      ].join(";");
+
+      return Effect.gen(function* () {
+        const processes = yield* ProcessService;
+        const child = yield* processes.spawnScoped(
+          process.execPath,
+          ["-e", script],
+          { stdio: "pipe" },
+          shutdownPolicy,
+        );
+        const stdout = yield* Effect.fork(Stream.runHead(child.stdoutChunks));
+        const ready = yield* Stream.runHead(child.stderrChunks);
+        expect(ready).toEqual(Option.some("ready"));
+        yield* Effect.promise(
+          () => new Promise<void>((resolve) => setImmediate(resolve)),
+        );
+
+        const deliveryBeforeExit = yield* Fiber.poll(stdout);
+        let firstChunk = "";
+        if (Option.isSome(deliveryBeforeExit)) {
+          const head = yield* Fiber.join(stdout);
+          if (Option.isSome(head)) firstChunk = head.value;
+        }
+
+        yield* child.kill("SIGTERM");
+        expect(yield* child.waitForExit).toMatchObject({ signal: "SIGTERM" });
+        yield* Fiber.interrupt(stdout);
+
+        expect(Option.isSome(deliveryBeforeExit)).toBe(true);
+        expect(firstChunk.length).toBeGreaterThan(0);
+        expect(firstChunk).not.toContain("\n");
+        expect(Buffer.byteLength(firstChunk, "utf8")).toBeLessThan(
+          2 * 1_024 * 1_024,
+        );
+      }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+    },
+  );
+
+  it.effect("fails an output stream that closes before end", () => {
+    const events = new EventEmitter();
+    const stdout = new PassThrough();
+    const child = Object.assign(events, {
+      stdin: null,
+      stdout,
+      stderr: null,
+      kill: () => true,
+      unref: () => undefined,
+    });
+    spawnOverride.mockReturnValueOnce(child);
+
+    return Effect.gen(function* () {
+      const processes = yield* ProcessService;
+      const spawned = yield* processes.spawnScoped(
+        "premature-close",
+        [],
+        { stdio: "pipe" },
+        shutdownPolicy,
+      );
+      const captured = yield* Effect.fork(collect(spawned.stdoutChunks));
+
+      stdout.destroy();
+      yield* Effect.promise(
+        () => new Promise<void>((resolve) => setImmediate(resolve)),
+      );
+      const settled = yield* Fiber.poll(captured);
+      let failure: ProcessError | undefined;
+      if (Option.isSome(settled)) {
+        const outcome = yield* Effect.either(Fiber.join(captured));
+        if (outcome._tag === "Left") failure = outcome.left;
+      } else {
+        yield* Fiber.interrupt(captured);
+      }
+      events.emit("exit", 0, null);
+
+      expect(Option.isSome(settled)).toBe(true);
+      expect(failure).toMatchObject({
+        operation: "stream",
+        message: "readable stream closed before end",
+      });
+    }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
+  });
+
   it.effect(
     "bounds stdin completion before escalating managed shutdown",
     () => {
@@ -658,7 +790,7 @@ describe("ProcessService.Live", () => {
   );
 
   it.effect(
-    "writes stdin, frames stdout by LF, streams stderr, and replays exit",
+    "writes stdin, streams decoded output chunks, and replays exit",
     () => {
       const script = [
         "process.stdin.setEncoding('utf8')",
@@ -680,7 +812,7 @@ describe("ProcessService.Live", () => {
           { stdio: "pipe" },
           shutdownPolicy,
         );
-        const stdout = yield* Effect.fork(collect(child.stdoutLines));
+        const stdout = yield* Effect.fork(collect(child.stdoutChunks));
         const stderr = yield* Effect.fork(collect(child.stderrChunks));
 
         yield* child.writeStdin("input");
@@ -688,11 +820,9 @@ describe("ProcessService.Live", () => {
 
         expect(yield* child.waitForExit).toEqual({ code: 0, signal: null });
         expect(yield* child.waitForExit).toEqual({ code: 0, signal: null });
-        expect(yield* Fiber.join(stdout)).toEqual([
-          "first",
-          "second",
-          "tail:input",
-        ]);
+        expect((yield* Fiber.join(stdout)).join("")).toBe(
+          "first\nsecond\ntail:input\n",
+        );
         expect((yield* Fiber.join(stderr)).join("")).toBe("problem");
       }).pipe(Effect.scoped, Effect.provide(ProcessService.Live));
     },
@@ -715,7 +845,7 @@ describe("ProcessService.Live", () => {
         expect(first).toBeInstanceOf(ProcessError);
         expect(first.operation).toBe("spawn");
         expect(second).toEqual(first);
-        expect(yield* collect(child.stdoutLines)).toEqual([]);
+        expect(yield* collect(child.stdoutChunks)).toEqual([]);
         expect(yield* collect(child.stderrChunks)).toEqual([]);
       }).pipe(Effect.scoped, Effect.provide(ProcessService.Live)),
   );

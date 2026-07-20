@@ -21,9 +21,9 @@ Requesting EOF is distinct from waiting for buffered standard input to finish. E
 
 ## Output and Terminal Result
 
-- Standard output is exposed as LF-delimited lines.
-- Standard error is exposed as decoded chunks so diagnostics retain chunk-oriented delivery.
-- Standard-error buffering is bounded so a burst cannot create unbounded retained chunks; backpressure is released as consumers advance.
+- Standard output and standard error are exposed as incrementally decoded UTF-8 chunks. Decoder state spans underlying byte chunks so split code points are preserved, including final decoder output at clean end-of-stream.
+- Output delivery is bounded and backpressured on both streams so unread bursts cannot create unbounded retained chunks at the service boundary; readers resume as consumers advance.
+- Consumers own any protocol-specific framing over decoded chunks rather than imposing line buffering on every process.
 - A process has one terminal result, completed by its first exit or a failure before successful spawn. Post-spawn process errors are recorded but do not prove termination or suppress later signal escalation. Waiting is replayable, so every evaluation observes the same exit or pre-spawn failure.
 
 ## Termination Ownership

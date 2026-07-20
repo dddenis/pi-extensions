@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import {
   Cause,
   Chunk,
@@ -44,7 +44,7 @@ export class ProcessError extends Data.TaggedError("ProcessError")<{
 export interface SpawnedProcess {
   readonly writeStdin: (value: string) => Effect.Effect<void, ProcessError>;
   readonly endStdin: Effect.Effect<void, ProcessError>;
-  readonly stdoutLines: Stream.Stream<string, ProcessError>;
+  readonly stdoutChunks: Stream.Stream<string, ProcessError>;
   readonly stderrChunks: Stream.Stream<string, ProcessError>;
   /** Replayable: every evaluation observes the same terminal exit/error result. */
   readonly waitForExit: Effect.Effect<ProcessExit, ProcessError>;
@@ -139,9 +139,18 @@ const readableChunks = (
 ): Stream.Stream<string, ProcessError> =>
   Stream.async<string, ProcessError>((emit) => {
     let active = true;
+    const decoder = new StringDecoder("utf8");
     const onData = (chunk: Buffer | string): void => {
+      if (!active) return;
       readable.pause();
-      void emit(Effect.succeed(Chunk.of(chunk.toString()))).then(
+      const decoded = decoder.write(
+        typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
+      );
+      if (decoded === "") {
+        if (active) readable.resume();
+        return;
+      }
+      void emit(Effect.succeed(Chunk.of(decoded))).then(
         () => {
           if (active) readable.resume();
         },
@@ -150,16 +159,38 @@ const readableChunks = (
     };
     const onEnd = (): void => {
       active = false;
-      void emit(Effect.fail(Option.none()));
+      const trailing = decoder.end();
+      if (trailing === "") {
+        void emit(Effect.fail(Option.none()));
+        return;
+      }
+      void emit(Effect.succeed(Chunk.of(trailing))).then(
+        () => emit(Effect.fail(Option.none())),
+        () => undefined,
+      );
     };
     const onError = (cause: unknown): void => {
       active = false;
       void emit(Effect.fail(Option.some(processError("stream", cause))));
     };
-
+    const onClose = (): void => {
+      if (!active) return;
+      active = false;
+      void emit(
+        Effect.fail(
+          Option.some(
+            new ProcessError({
+              operation: "stream",
+              message: "readable stream closed before end",
+            }),
+          ),
+        ),
+      );
+    };
     readable.on("data", onData);
     readable.once("end", onEnd);
     readable.once("error", onError);
+    readable.once("close", onClose);
 
     return Effect.sync(() => {
       active = false;
@@ -167,35 +198,9 @@ const readableChunks = (
       readable.off("data", onData);
       readable.off("end", onEnd);
       readable.off("error", onError);
+      readable.off("close", onClose);
     });
   }, streamBufferSize);
-
-const readableLines = (
-  readable: Readable,
-): Stream.Stream<string, ProcessError> =>
-  Stream.async<string, ProcessError>((emit) => {
-    const lines = createInterface({ input: readable, crlfDelay: Infinity });
-    const onLine = (line: string): void => {
-      emit(Effect.succeed(Chunk.of(line)));
-    };
-    const onClose = (): void => {
-      emit(Effect.fail(Option.none()));
-    };
-    const onError = (cause: unknown): void => {
-      emit(Effect.fail(Option.some(processError("stream", cause))));
-    };
-
-    lines.on("line", onLine);
-    lines.once("close", onClose);
-    readable.once("error", onError);
-
-    return Effect.sync(() => {
-      lines.off("line", onLine);
-      lines.off("close", onClose);
-      readable.off("error", onError);
-      lines.close();
-    });
-  }, 16);
 
 const writeToStdin = (
   stdin: Writable | null,
@@ -393,9 +398,9 @@ const makeSpawnedProcess = (
       operation: "stdin",
       message: "stdin is unavailable for a process spawned with ignored stdio",
     });
-    const stdoutLines =
+    const stdoutChunks =
       options.stdio === "pipe" && child.stdout !== null
-        ? readableLines(child.stdout)
+        ? readableChunks(child.stdout)
         : Stream.empty;
     const stderrChunks =
       options.stdio === "pipe" && child.stderr !== null
@@ -636,7 +641,7 @@ const makeSpawnedProcess = (
         requestStdinEnd,
         awaitStdinEnd,
         endStdin: requestStdinEnd.pipe(Effect.zipRight(awaitStdinEnd)),
-        stdoutLines,
+        stdoutChunks,
         stderrChunks,
         waitForExit,
         kill,

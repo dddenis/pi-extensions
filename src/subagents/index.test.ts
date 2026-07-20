@@ -516,7 +516,7 @@ describe("subagent scoped runtime shutdown", () => {
       requestStdinEnd: Effect.void,
       awaitStdinEnd: Effect.void,
       endStdin: Effect.void,
-      stdoutLines: Stream.empty,
+      stdoutChunks: Stream.empty,
       stderrChunks: Stream.empty,
       waitForExit: Effect.sync(() => exitAwaited.resolve()).pipe(
         Effect.zipRight(Deferred.await(terminal)),
@@ -584,5 +584,143 @@ describe("subagent scoped runtime shutdown", () => {
     await secondShutdown;
     expect(disposalCalls).toBe(1);
     expect(signals).toEqual(["SIGTERM"]);
+  });
+
+  it("starts every invocation shutdown in parallel before releasing cleanup", async () => {
+    const cleanupRelease = await Effect.runPromise(Deferred.make<void>());
+    const firstInvocationStarted = Promise.withResolvers<void>();
+    const bothInvocationsStarted = Promise.withResolvers<void>();
+    const firstCleanupStarted = Promise.withResolvers<void>();
+    const bothInvocationsStopping = Promise.withResolvers<void>();
+    const allActiveChildrenStopping = Promise.withResolvers<void>();
+    const events: Array<string> = [];
+    const spawned: Array<string> = [];
+    const stoppingInvocations = new Set<string>();
+    const stoppingChildren = new Set<string>();
+
+    const invocationFor = (cwd: string): "left" | "right" =>
+      cwd.includes("left-") ? "left" : "right";
+    const taskName = (cwd: string): string => {
+      const segments = cwd.split("/");
+      return segments[segments.length - 1] ?? cwd;
+    };
+    const recordSpawn = (cwd: string): void => {
+      const name = taskName(cwd);
+      spawned.push(name);
+      events.push(`spawn:${name}`);
+      if (spawned.length === 2) firstInvocationStarted.resolve();
+      if (spawned.length === 3) bothInvocationsStarted.resolve();
+    };
+    const recordShutdown = (cwd: string): void => {
+      const name = taskName(cwd);
+      events.push(`shutdown:${name}`);
+      stoppingInvocations.add(invocationFor(cwd));
+      stoppingChildren.add(name);
+      firstCleanupStarted.resolve();
+      if (stoppingInvocations.size === 2) bothInvocationsStopping.resolve();
+      if (stoppingChildren.size === 3) allActiveChildrenStopping.resolve();
+    };
+
+    const scriptedProcessLayer = Layer.succeed(ProcessService, {
+      spawnScoped: (_command, _args, options) => {
+        const cwd = options.cwd ?? "/workspace/unavailable";
+        return Effect.acquireRelease(
+          Effect.gen(function* () {
+            recordSpawn(cwd);
+            const shutdown = yield* Effect.cached(
+              Effect.sync(() => recordShutdown(cwd)).pipe(
+                Effect.zipRight(Deferred.await(cleanupRelease)),
+                Effect.as(
+                  exitedReport({ code: null, signal: "SIGTERM" }, ["SIGTERM"]),
+                ),
+              ),
+            );
+            return {
+              writeStdin: () => Effect.void,
+              requestStdinEnd: Effect.void,
+              awaitStdinEnd: Effect.void,
+              endStdin: Effect.void,
+              stdoutChunks: Stream.empty,
+              stderrChunks: Stream.empty,
+              waitForExit: Effect.never,
+              kill: () => Effect.void,
+              unref: Effect.void,
+              shutdown,
+            } satisfies ManagedProcess;
+          }),
+          (managed) => managed.shutdown.pipe(Effect.asVoid),
+        );
+      },
+      spawnDetached: () =>
+        Effect.die(new Error("unexpected scripted detached process")),
+    } satisfies ProcessServiceShape);
+    const effectRunner = makeEffectRunner(
+      Layer.merge(scriptedProcessLayer, SubagentRuntimeStateLive),
+    );
+    const runtime = makeSubagentRuntime(effectRunner);
+    const command = { command: "pi", args: [] } satisfies ChildCommand;
+    const task = (description: string) => ({
+      description,
+      prompt: "prompt",
+      cwd: description,
+    });
+    const left = runtime.run(
+      {
+        tasks: [task("left-1"), task("left-2")],
+        parentCwd: "/workspace",
+        command,
+      },
+      undefined,
+    );
+    const leftOutcome = left.then(
+      () => "completed" as const,
+      () => "interrupted" as const,
+    );
+
+    await firstInvocationStarted.promise;
+    const right = runtime.run(
+      {
+        tasks: [task("right-1"), task("right-2")],
+        parentCwd: "/workspace",
+        command,
+      },
+      undefined,
+    );
+    const rightOutcome = right.then(
+      () => "completed" as const,
+      () => "interrupted" as const,
+    );
+
+    await bothInvocationsStarted.promise;
+    expect(spawned).toEqual(["left-1", "left-2", "right-1"]);
+    const disposal = runtime.dispose();
+    await firstCleanupStarted.promise;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const allStoppedBeforeRelease = await Promise.race([
+      allActiveChildrenStopping.promise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve(false), 100);
+      }),
+    ]);
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    await Effect.runPromise(
+      Deferred.succeed(cleanupRelease, undefined).pipe(Effect.asVoid),
+    );
+    await disposal;
+    const outcomes = await Promise.all([leftOutcome, rightOutcome]);
+
+    const firstShutdown = events.findIndex((event) =>
+      event.startsWith("shutdown:"),
+    );
+    const spawnsAfterShutdown = events
+      .slice(firstShutdown + 1)
+      .filter((event) => event.startsWith("spawn:"));
+    expect(allStoppedBeforeRelease).toBe(true);
+    await expect(bothInvocationsStopping.promise).resolves.toBeUndefined();
+    expect(stoppingInvocations).toEqual(new Set(["left", "right"]));
+    expect(stoppingChildren).toEqual(new Set(["left-1", "left-2", "right-1"]));
+    expect(spawnsAfterShutdown).toEqual([]);
+    expect(spawned).not.toContain("right-2");
+    expect(outcomes).toEqual(["interrupted", "interrupted"]);
   });
 });

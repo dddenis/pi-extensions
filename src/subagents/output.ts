@@ -60,13 +60,16 @@ interface TextMetrics {
   readonly endsWithLineFeed: boolean;
 }
 
-interface SectionPlan {
+interface SectionSkeleton {
   readonly label: string;
+  readonly skeleton: string;
+  readonly skeletonMetrics: TextMetrics;
+}
+
+interface SectionPlan extends SectionSkeleton {
   readonly body: string;
   readonly full: string;
   readonly fullMetrics: TextMetrics;
-  readonly skeleton: string;
-  readonly skeletonMetrics: TextMetrics;
 }
 
 const OUTPUT_MARKERS = [
@@ -417,13 +420,24 @@ const failureSuffix = (result: SubagentTaskResult): string => {
   return " (execution failure)";
 };
 
-const makeSectionPlan = (
-  result: SubagentTaskResult,
+const makeSectionSkeleton = (
   index: number,
   description: string,
-  cwd: string,
-): SectionPlan => {
+): SectionSkeleton => {
   const label = "[" + String(index + 1) + "] " + description;
+  const skeleton = label + "\n" + AGGREGATE_OMISSION;
+  return {
+    label,
+    skeleton,
+    skeletonMetrics: measureText(skeleton),
+  };
+};
+
+const makeSectionPlan = (
+  result: SubagentTaskResult,
+  cwd: string,
+  skeleton: SectionSkeleton,
+): SectionPlan => {
   const stdout = boundedChildText(result.output, "head");
   const bodyParts = [
     "cwd: " + cwd,
@@ -434,16 +448,13 @@ const makeSectionPlan = (
     bodyParts.push("stderr:", boundedChildText(result.stderr ?? "", "tail"));
   }
   const body = bodyParts.join("\n");
-  const full = label + "\n" + body;
-  const skeleton = label + "\n" + AGGREGATE_OMISSION;
+  const full = skeleton.label + "\n" + body;
 
   return {
-    label,
+    ...skeleton,
     body,
     full,
     fullMetrics: measureText(full),
-    skeleton,
-    skeletonMetrics: measureText(skeleton),
   };
 };
 
@@ -631,9 +642,6 @@ export const formatSubagentResults = (
       "(unnamed task)",
     ),
   );
-  const cwds = results.map((result) =>
-    makeDisplayLabel(result.cwd, CWD_MAX_BYTES, "(unavailable cwd)"),
-  );
   const statusLines = results.map((result, index) => {
     const description = descriptions[index] ?? "(unnamed task)";
     return (
@@ -648,33 +656,32 @@ export const formatSubagentResults = (
   const statusLineBytes = statusLines.map((line) =>
     Buffer.byteLength(line, "utf8"),
   );
-  const sections = results.map((result, index) =>
-    makeSectionPlan(
-      result,
-      index,
-      descriptions[index] ?? "(unnamed task)",
-      cwds[index] ?? "(unavailable cwd)",
-    ),
+  const sectionSkeletons = results.map((_result, index) =>
+    makeSectionSkeleton(index, descriptions[index] ?? "(unnamed task)"),
   );
 
   let statusBytes = Buffer.byteLength(HEADER, "utf8");
   for (const lineBytes of statusLineBytes) statusBytes += 1 + lineBytes;
   const statusLinesCount = 1 + statusLines.length;
   const suffixSkeletonBytes = Array.from(
-    { length: sections.length + 1 },
+    { length: sectionSkeletons.length + 1 },
     () => 0,
   );
   const suffixSkeletonLines = Array.from(
-    { length: sections.length + 1 },
+    { length: sectionSkeletons.length + 1 },
     () => 0,
   );
-  for (let index = sections.length - 1; index >= 0; index -= 1) {
-    const section = sections[index];
-    if (section === undefined) continue;
+  for (let index = sectionSkeletons.length - 1; index >= 0; index -= 1) {
+    const skeleton = sectionSkeletons[index];
+    if (skeleton === undefined) continue;
     suffixSkeletonBytes[index] =
-      2 + section.skeletonMetrics.bytes + (suffixSkeletonBytes[index + 1] ?? 0);
+      2 +
+      skeleton.skeletonMetrics.bytes +
+      (suffixSkeletonBytes[index + 1] ?? 0);
     suffixSkeletonLines[index] =
-      1 + section.skeletonMetrics.lines + (suffixSkeletonLines[index + 1] ?? 0);
+      1 +
+      skeleton.skeletonMetrics.lines +
+      (suffixSkeletonLines[index + 1] ?? 0);
   }
 
   const minimumBytes = statusBytes + (suffixSkeletonBytes[0] ?? 0);
@@ -689,10 +696,11 @@ export const formatSubagentResults = (
     builder.append(statusLine);
   }
 
-  for (let index = 0; index < sections.length; index += 1) {
-    const section = sections[index];
-    if (section === undefined) continue;
-    const remainingTasks = sections.length - index;
+  for (let index = 0; index < sectionSkeletons.length; index += 1) {
+    const skeleton = sectionSkeletons[index];
+    const result = results[index];
+    if (skeleton === undefined || result === undefined) continue;
+    const remainingTasks = sectionSkeletons.length - index;
     const separator = builder.sectionSeparator();
     const separatorBytes = Buffer.byteLength(separator, "utf8");
     const laterBytes = suffixSkeletonBytes[index + 1] ?? 0;
@@ -701,23 +709,34 @@ export const formatSubagentResults = (
       limits.maxBytes -
       builder.bytes -
       separatorBytes -
-      section.skeletonMetrics.bytes -
+      skeleton.skeletonMetrics.bytes -
       laterBytes;
     const discretionaryLines =
       limits.maxLines -
       builder.lines() -
       1 -
-      section.skeletonMetrics.lines -
+      skeleton.skeletonMetrics.lines -
       laterLines;
     const sectionLimits: OutputLimits = {
       maxBytes:
-        section.skeletonMetrics.bytes +
+        skeleton.skeletonMetrics.bytes +
         Math.floor(discretionaryBytes / remainingTasks),
       maxLines:
-        section.skeletonMetrics.lines +
+        skeleton.skeletonMetrics.lines +
         Math.floor(discretionaryLines / remainingTasks),
     };
-    const rendered = renderSectionWithin(section, sectionLimits);
+    const rendered =
+      sectionLimits.maxBytes === skeleton.skeletonMetrics.bytes ||
+      sectionLimits.maxLines === skeleton.skeletonMetrics.lines
+        ? skeleton.skeleton
+        : renderSectionWithin(
+            makeSectionPlan(
+              result,
+              makeDisplayLabel(result.cwd, CWD_MAX_BYTES, "(unavailable cwd)"),
+              skeleton,
+            ),
+            sectionLimits,
+          );
     builder.append(separator);
     builder.append(rendered);
   }

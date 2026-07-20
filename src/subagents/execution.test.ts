@@ -337,6 +337,33 @@ describe("subagent batch execution with the live Process Service", () => {
     });
   }, 10_000);
 
+  it("bounds large newline-free stdout delivered in chunks", async () => {
+    await withTempDirectory(async (directory) => {
+      const semaphore = await makeSemaphore();
+      const chunk = "x".repeat(1_024);
+      const results = await liveBatch({
+        tasks: [
+          {
+            description: "large newline-free output",
+            prompt: JSON.stringify({
+              stdout: [chunk],
+              stdoutRepeat: 2_048,
+            }),
+          },
+        ],
+        parentCwd: directory,
+        command: fixtureCommand(),
+        semaphore,
+      });
+      const result = resultAt(results, 0);
+
+      expect(result.status).toBe("completed");
+      expectBoundedCapture(result.output);
+      expect(result.output.startsWith("x")).toBe(true);
+      expect(result.output).toContain("omitted");
+    });
+  }, 10_000);
+
   it("enforces one global cap across calls", async () => {
     await withTempDirectory(async (directory) => {
       const startedDirectory = join(directory, "started");
@@ -477,7 +504,7 @@ interface ScriptedProcessInput {
   readonly writeStdin?: (value: string) => Effect.Effect<void, ProcessError>;
   readonly requestStdinEnd?: Effect.Effect<void, ProcessError>;
   readonly awaitStdinEnd?: Effect.Effect<void, ProcessError>;
-  readonly stdoutLines?: Stream.Stream<string, ProcessError>;
+  readonly stdoutChunks?: Stream.Stream<string, ProcessError>;
   readonly stderrChunks?: Stream.Stream<string, ProcessError>;
   readonly waitForExit?: Effect.Effect<ProcessExit, ProcessError>;
   readonly kill?: (
@@ -497,7 +524,7 @@ const makeScriptedProcess = (
     requestStdinEnd,
     awaitStdinEnd,
     endStdin: requestStdinEnd.pipe(Effect.zipRight(awaitStdinEnd)),
-    stdoutLines: input.stdoutLines ?? Stream.fromIterable(["ok"]),
+    stdoutChunks: input.stdoutChunks ?? Stream.fromIterable(["ok"]),
     stderrChunks: input.stderrChunks ?? Stream.empty,
     waitForExit: input.waitForExit ?? Effect.succeed(cleanExit),
     kill: input.kill ?? (() => Effect.void),
@@ -578,7 +605,7 @@ describe("subagent batch execution with scripted Process Service failures", () =
       const failedCwd = resolve(directory, "stdout-failure");
       const successfulCwd = resolve(directory, "success");
       const stdoutFailure = makeScriptedProcess({
-        stdoutLines: Stream.fail(
+        stdoutChunks: Stream.fail(
           new ProcessError({
             operation: "stream",
             message: "stdout broke",
@@ -686,7 +713,7 @@ describe("subagent batch execution with scripted Process Service failures", () =
               message: "stdin broke",
             }),
           ),
-        stdoutLines: drain("stdout"),
+        stdoutChunks: drain("stdout"),
         stderrChunks: drain("stderr"),
         waitForExit: Deferred.await(terminal),
         shutdown,
@@ -830,7 +857,7 @@ describe("subagent batch cancellation", () => {
         ),
       );
       const neverExiting = makeScriptedProcess({
-        stdoutLines: Stream.empty,
+        stdoutChunks: Stream.empty,
         stderrChunks: Stream.empty,
         waitForExit: Deferred.await(terminal),
         kill,

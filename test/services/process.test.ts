@@ -38,10 +38,10 @@ describe("ProcessServiceTest", () => {
         args.push("mutated");
         env.TOKEN = "mutated";
 
-        const stdout = yield* Effect.fork(collect(child.stdoutLines));
+        const stdout = yield* Effect.fork(collect(child.stdoutChunks));
         const stderr = yield* Effect.fork(collect(child.stderrChunks));
-        yield* controls.emitStdout("first");
-        yield* controls.emitStdout("second");
+        yield* controls.emitStdoutChunk("first");
+        yield* controls.emitStdoutChunk("second");
         yield* controls.emitStderr("warning");
         yield* child.writeStdin("request\n");
         yield* child.endStdin;

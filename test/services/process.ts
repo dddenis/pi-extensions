@@ -45,7 +45,8 @@ export interface ProcessServiceTestState {
 }
 
 export interface ProcessServiceTestService {
-  readonly emitStdout: (line: string) => Effect.Effect<void>;
+  readonly emitStdoutChunk: (chunk: string) => Effect.Effect<void>;
+  readonly endStdout: Effect.Effect<void>;
   readonly emitStderr: (chunk: string) => Effect.Effect<void>;
   readonly emitExit: (exit: ProcessExit) => Effect.Effect<void>;
   readonly emitError: (error: ProcessError) => Effect.Effect<void>;
@@ -184,7 +185,7 @@ const makeProcessService = (
         endStdin: requestStdinEnd.pipe(
           Effect.zipRight(Deferred.await(stdinEnd)),
         ),
-        stdoutLines: Stream.fromQueue(stdout).pipe(
+        stdoutChunks: Stream.fromQueue(stdout).pipe(
           Stream.flattenTake,
           Stream.ensuring(
             Ref.update(ref, (state) => ({
@@ -341,11 +342,15 @@ const makeProcessService = (
 const makeProcessServiceTest = (
   ref: ProcessServiceTestRef,
 ): ProcessServiceTestService => ({
-  emitStdout: (line) =>
-    activeProcess(ref, "emitStdout").pipe(
-      Effect.flatMap((active) => Queue.offer(active.stdout, Take.of(line))),
+  emitStdoutChunk: (chunk) =>
+    activeProcess(ref, "emitStdoutChunk").pipe(
+      Effect.flatMap((active) => Queue.offer(active.stdout, Take.of(chunk))),
       Effect.asVoid,
     ),
+  endStdout: activeProcess(ref, "endStdout").pipe(
+    Effect.flatMap((active) => Queue.offer(active.stdout, Take.end)),
+    Effect.asVoid,
+  ),
   emitStderr: (chunk) =>
     activeProcess(ref, "emitStderr").pipe(
       Effect.flatMap((active) => Queue.offer(active.stderr, Take.of(chunk))),

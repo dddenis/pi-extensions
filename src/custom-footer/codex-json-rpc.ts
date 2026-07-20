@@ -111,6 +111,7 @@ const runSession = (
         >();
         const initialized = yield* Ref.make(false);
         const stderr = yield* Ref.make("");
+        const stdoutJsonLines = child.stdoutChunks.pipe(Stream.splitLines);
 
         const stderrFiber = yield* Effect.forkScoped(
           restore(
@@ -125,7 +126,7 @@ const runSession = (
 
         yield* Effect.forkScoped(
           restore(
-            Stream.runForEach(child.stdoutLines, (line) =>
+            Stream.runForEach(stdoutJsonLines, (line) =>
               Ref.get(initialized).pipe(
                 Effect.flatMap((isInitialized) =>
                   isInitialized

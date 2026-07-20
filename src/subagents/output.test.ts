@@ -169,6 +169,55 @@ describe("formatSubagentResults", () => {
     expect(text).toContain("omitted");
   });
 
+  it("carries unused early capacity into a later task asymmetrically", () => {
+    const limits = { maxBytes: 360, maxLines: 30 };
+    const withUnusedEarlyCapacity = formatSubagentResults(
+      [
+        completed("short first", "ok"),
+        completed("large second", "B".repeat(500)),
+      ],
+      limits,
+    );
+    const withConsumedEarlyCapacity = formatSubagentResults(
+      [
+        completed("large first", "A".repeat(500)),
+        completed("large second", "B".repeat(500)),
+      ],
+      limits,
+    );
+    const retainedBs = (text: string): number =>
+      Array.from(text).filter((character) => character === "B").length;
+
+    expect(retainedBs(withUnusedEarlyCapacity)).toBeGreaterThan(
+      retainedBs(withConsumedEarlyCapacity),
+    );
+    expect(withUnusedEarlyCapacity).toContain("[1] short first");
+    expect(withUnusedEarlyCapacity).toContain("[2] large second");
+  });
+
+  it("does not read task bodies when every section must be omitted", () => {
+    let outputReads = 0;
+    const result = {
+      description: "omitted task",
+      cwd: "/repo",
+      status: "completed",
+      exitCode: 0,
+      signal: null,
+      get output(): string {
+        outputReads += 1;
+        return "unneeded".repeat(10_000);
+      },
+    } satisfies SubagentTaskResult;
+
+    const text = formatSubagentResults([result], {
+      maxBytes: 60,
+      maxLines: 2,
+    });
+
+    expect(outputReads).toBe(0);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(60);
+  });
+
   it("reports status omission when a huge task list consumes the budget", () => {
     const results = Array.from({ length: 100 }, (_, index) =>
       completed("task-" + String(index + 1), "done"),
