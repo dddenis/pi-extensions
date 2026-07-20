@@ -47,6 +47,7 @@ export interface ProcessServiceTestState {
 export interface ProcessServiceTestService {
   readonly emitStdoutChunk: (chunk: string) => Effect.Effect<void>;
   readonly endStdout: Effect.Effect<void>;
+  readonly failStdout: (error: ProcessError) => Effect.Effect<void>;
   readonly emitStderr: (chunk: string) => Effect.Effect<void>;
   readonly emitExit: (exit: ProcessExit) => Effect.Effect<void>;
   readonly emitError: (error: ProcessError) => Effect.Effect<void>;
@@ -351,6 +352,13 @@ const makeProcessServiceTest = (
     Effect.flatMap((active) => Queue.offer(active.stdout, Take.end)),
     Effect.asVoid,
   ),
+  failStdout: (error) =>
+    activeProcess(ref, "failStdout").pipe(
+      Effect.flatMap((active) =>
+        Queue.offer(active.stdout, Take.fail(copyError(error))),
+      ),
+      Effect.asVoid,
+    ),
   emitStderr: (chunk) =>
     activeProcess(ref, "emitStderr").pipe(
       Effect.flatMap((active) => Queue.offer(active.stderr, Take.of(chunk))),

@@ -45,6 +45,7 @@ export type RateLimitReadError =
   CodexRateLimitError | FileSystemError | ProcessError | RateLimitProtocolError;
 
 const stderrLimit = 500;
+const jsonRpcRecordLimit = 64 * 1024;
 const requestTimeout = Duration.seconds(20);
 const shutdownPolicy = {
   stdinCloseTimeout: Duration.millis(100),
@@ -81,6 +82,76 @@ const completeFailure = (
   error: RateLimitReadError,
 ): Effect.Effect<void> => Deferred.fail(result, error).pipe(Effect.asVoid);
 
+interface JsonRpcRecordFramer {
+  readonly push: (chunk: string) => Iterable<string>;
+  readonly finish: () => string | undefined;
+  readonly discard: () => void;
+}
+
+const makeJsonRpcRecordFramer = (): JsonRpcRecordFramer => {
+  let segments: Array<string> = [];
+  let retainedLength = 0;
+  let discarding = false;
+
+  const reset = (): void => {
+    segments = [];
+    retainedLength = 0;
+    discarding = false;
+  };
+
+  const retain = (chunk: string, start: number, end: number): boolean => {
+    const length = end - start;
+    if (retainedLength + length > jsonRpcRecordLimit) {
+      reset();
+      discarding = true;
+      return false;
+    }
+    if (length === 0) return true;
+
+    segments.push(chunk.slice(start, end));
+    retainedLength += length;
+    if (segments.length >= 64) segments = [segments.join("")];
+    return true;
+  };
+
+  const takeRecord = (stripCarriageReturn: boolean): string => {
+    const record = segments.join("");
+    reset();
+    return stripCarriageReturn && record.endsWith("\r")
+      ? record.slice(0, -1)
+      : record;
+  };
+
+  const push = function* (chunk: string): Generator<string> {
+    let recordStart = 0;
+    let newline = chunk.indexOf("\n");
+
+    while (newline >= 0) {
+      if (!discarding && retain(chunk, recordStart, newline)) {
+        yield takeRecord(true);
+      } else {
+        reset();
+      }
+      recordStart = newline + 1;
+      newline = chunk.indexOf("\n", recordStart);
+    }
+
+    if (!discarding && recordStart < chunk.length) {
+      retain(chunk, recordStart, chunk.length);
+    }
+  };
+
+  const finish = (): string | undefined => {
+    if (discarding || retainedLength === 0) {
+      reset();
+      return undefined;
+    }
+    return takeRecord(false);
+  };
+
+  return { push, finish, discard: reset };
+};
+
 const appendStderr = (
   stderr: Ref.Ref<string>,
   chunk: string,
@@ -111,7 +182,46 @@ const runSession = (
         >();
         const initialized = yield* Ref.make(false);
         const stderr = yield* Ref.make("");
-        const stdoutJsonLines = child.stdoutChunks.pipe(Stream.splitLines);
+        const stdoutFramer = makeJsonRpcRecordFramer();
+
+        const processStdoutRecord = (line: string) =>
+          Ref.get(initialized).pipe(
+            Effect.flatMap((isInitialized) =>
+              isInitialized
+                ? decodeRateLimitsJsonRpcLine(line).pipe(
+                    Effect.flatMap(
+                      Option.match({
+                        onNone: () => Effect.void,
+                        onSome: (response) => {
+                          const snapshot = selectCodexRateLimit(response);
+                          return snapshot === null
+                            ? Effect.void
+                            : Deferred.succeed(result, snapshot).pipe(
+                                Effect.asVoid,
+                              );
+                        },
+                      }),
+                    ),
+                  )
+                : decodeInitializeJsonRpcLine(line).pipe(
+                    Effect.flatMap(
+                      Option.match({
+                        onNone: () => Effect.void,
+                        onSome: () =>
+                          Ref.getAndSet(initialized, true).pipe(
+                            Effect.flatMap((alreadyInitialized) =>
+                              alreadyInitialized
+                                ? Effect.void
+                                : child.writeStdin(
+                                    `${encodeRateLimitsReadRequest()}\n`,
+                                  ),
+                            ),
+                          ),
+                      }),
+                    ),
+                  ),
+            ),
+          );
 
         const stderrFiber = yield* Effect.forkScoped(
           restore(
@@ -126,46 +236,25 @@ const runSession = (
 
         yield* Effect.forkScoped(
           restore(
-            Stream.runForEach(stdoutJsonLines, (line) =>
-              Ref.get(initialized).pipe(
-                Effect.flatMap((isInitialized) =>
-                  isInitialized
-                    ? decodeRateLimitsJsonRpcLine(line).pipe(
-                        Effect.flatMap(
-                          Option.match({
-                            onNone: () => Effect.void,
-                            onSome: (response) => {
-                              const snapshot = selectCodexRateLimit(response);
-                              return snapshot === null
-                                ? Effect.void
-                                : Deferred.succeed(result, snapshot).pipe(
-                                    Effect.asVoid,
-                                  );
-                            },
-                          }),
-                        ),
-                      )
-                    : decodeInitializeJsonRpcLine(line).pipe(
-                        Effect.flatMap(
-                          Option.match({
-                            onNone: () => Effect.void,
-                            onSome: () =>
-                              Ref.getAndSet(initialized, true).pipe(
-                                Effect.flatMap((alreadyInitialized) =>
-                                  alreadyInitialized
-                                    ? Effect.void
-                                    : child.writeStdin(
-                                        `${encodeRateLimitsReadRequest()}\n`,
-                                      ),
-                                ),
-                              ),
-                          }),
-                        ),
-                      ),
+            Stream.runForEach(child.stdoutChunks, (chunk) =>
+              Effect.forEach(stdoutFramer.push(chunk), processStdoutRecord, {
+                discard: true,
+              }),
+            ).pipe(
+              Effect.zipRight(
+                Effect.sync(stdoutFramer.finish).pipe(
+                  Effect.flatMap((pending) =>
+                    pending === undefined
+                      ? Effect.void
+                      : processStdoutRecord(pending),
+                  ),
                 ),
               ),
-            ).pipe(
-              Effect.catchAll((error) => completeFailure(result, error)),
+              Effect.catchAll((error) =>
+                Effect.sync(stdoutFramer.discard).pipe(
+                  Effect.zipRight(completeFailure(result, error)),
+                ),
+              ),
               Effect.asVoid,
             ),
           ),

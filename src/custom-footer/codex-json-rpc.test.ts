@@ -1,5 +1,13 @@
 import { describe, it } from "@effect/vitest";
-import { Duration, Effect, Either, Fiber, Layer, TestClock } from "effect";
+import {
+  Duration,
+  Effect,
+  Either,
+  Fiber,
+  Layer,
+  Option,
+  TestClock,
+} from "effect";
 import { expect } from "vitest";
 import { EnvironmentServiceTest } from "../../test/services/environment";
 import { FileSystemServiceTest } from "../../test/services/file-system";
@@ -325,7 +333,7 @@ describe("readOpenAiRateLimits", () => {
   );
 
   it.effect(
-    "frames JSON-RPC across stdout chunks and flushes a final unterminated line",
+    "frames split CRLF JSON-RPC and flushes a final unterminated line at clean EOF",
     () =>
       Effect.gen(function* () {
         const controls = yield* ProcessServiceTest;
@@ -337,8 +345,9 @@ describe("readOpenAiRateLimits", () => {
           initializeResult.slice(0, initializeSplit),
         );
         yield* controls.emitStdoutChunk(
-          `${initializeResult.slice(initializeSplit)}\nnot json\n`,
+          `${initializeResult.slice(initializeSplit)}\r`,
         );
+        yield* controls.emitStdoutChunk("\nnot json\r\n");
         const initialized = yield* waitForYields(
           controls.getState.pipe(
             Effect.map((state) => state.stdinWrites.length === 2),
@@ -361,6 +370,116 @@ describe("readOpenAiRateLimits", () => {
         yield* waitForSignalCount(1);
         yield* controls.emitExit(exit());
 
+        expect(yield* Fiber.join(request)).toEqual({
+          limitId: "codex",
+          primary: { usedPercent: 25 },
+        });
+      }).pipe(
+        Effect.provide(
+          infrastructureLayer({ exists: new Map([[bunCodex, true]]) }),
+        ),
+      ),
+  );
+
+  it.effect("discards an unterminated response when stdout fails", () =>
+    Effect.gen(function* () {
+      const controls = yield* ProcessServiceTest;
+      const request = yield* Effect.fork(readOpenAiRateLimits);
+      yield* waitForSpawn;
+      yield* controls.emitStdoutChunk(`${initializeResult}\n`);
+      yield* waitFor(
+        controls.getState.pipe(
+          Effect.map((state) => state.stdinWrites.length === 2),
+        ),
+      );
+
+      yield* controls.emitStdoutChunk(rateLimitResult);
+      yield* controls.failStdout(
+        new ProcessError({
+          operation: "stream",
+          message: "stdout failed",
+        }),
+      );
+      yield* waitForSignalCount(1);
+      yield* controls.emitExit(exit());
+
+      const result = yield* Effect.either(Fiber.join(request));
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(ProcessError);
+        expect(result.left).toMatchObject({
+          operation: "stream",
+          message: "stdout failed",
+        });
+      }
+    }).pipe(
+      Effect.provide(
+        infrastructureLayer({ exists: new Map([[bunCodex, true]]) }),
+      ),
+    ),
+  );
+
+  it.effect(
+    "discards oversized records through LF and recovers on later CRLF records",
+    () =>
+      Effect.gen(function* () {
+        const controls = yield* ProcessServiceTest;
+        const request = yield* Effect.fork(readOpenAiRateLimits);
+        const oversizedWhitespace = " ".repeat(70_000);
+        yield* waitForSpawn;
+
+        yield* controls.emitStdoutChunk(oversizedWhitespace.slice(0, 35_000));
+        yield* controls.emitStdoutChunk(
+          `${oversizedWhitespace.slice(35_000)}${initializeResult}`,
+        );
+        yield* controls.emitStdoutChunk("\n");
+        const initializedFromOversizedRecord = yield* waitForYields(
+          controls.getState.pipe(
+            Effect.map((state) => state.stdinWrites.length === 2),
+          ),
+        );
+        if (initializedFromOversizedRecord) {
+          yield* controls.emitError(
+            new ProcessError({
+              operation: "stream",
+              message: "oversized initialize record was accepted",
+            }),
+          );
+          yield* Effect.either(Fiber.join(request));
+          expect(initializedFromOversizedRecord).toBe(false);
+          return;
+        }
+
+        yield* controls.emitStdoutChunk(`${initializeResult}\r\n`);
+        yield* waitFor(
+          controls.getState.pipe(
+            Effect.map((state) => state.stdinWrites.length === 2),
+          ),
+        );
+
+        yield* controls.emitStdoutChunk(oversizedWhitespace.slice(0, 35_000));
+        yield* controls.emitStdoutChunk(
+          `${oversizedWhitespace.slice(35_000)}${rateLimitResult}`,
+        );
+        yield* controls.emitStdoutChunk("\n");
+        const completedFromOversizedRecord = yield* waitForYields(
+          controls.getState.pipe(
+            Effect.map((state) => state.signals.length > 0),
+          ),
+        );
+        if (completedFromOversizedRecord) {
+          yield* controls.emitExit(exit());
+          yield* Effect.either(Fiber.join(request));
+          expect(completedFromOversizedRecord).toBe(false);
+          return;
+        }
+
+        expect(completedFromOversizedRecord).toBe(false);
+        expect(Option.isNone(yield* Fiber.poll(request))).toBe(true);
+
+        yield* controls.emitStdoutChunk(`${rateLimitResult}\r\n`);
+        yield* waitForSignalCount(1);
+        yield* controls.emitExit(exit());
         expect(yield* Fiber.join(request)).toEqual({
           limitId: "codex",
           primary: { usedPercent: 25 },
