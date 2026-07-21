@@ -120,6 +120,60 @@ describe("custom footer extraction", () => {
     ]);
   });
 
+  it("totals every persisted usage source using the assistant cache-hit percentage", () => {
+    const entries = [
+      messageEntry({
+        input: 100,
+        output: 10,
+        cacheRead: 50,
+        totalCost: 0.1,
+      }),
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          usage: usage({
+            input: 200,
+            output: 20,
+            cacheRead: 60,
+            cacheWrite: 10,
+            totalCost: 0.2,
+          }),
+        },
+      },
+      {
+        type: "compaction",
+        usage: usage({
+          input: 300,
+          output: 30,
+          cacheRead: 70,
+          cacheWrite: 20,
+          totalCost: 0.3,
+        }),
+      },
+      {
+        type: "branch_summary",
+        usage: usage({
+          input: 400,
+          output: 40,
+          cacheRead: 80,
+          cacheWrite: 30,
+          totalCost: 0.4,
+        }),
+      },
+    ];
+
+    expect(buildFooterRenderData(input({ entries })).stats).toEqual([
+      { text: "↑1.0k", tone: "dim" },
+      { text: "↓100", tone: "dim" },
+      { text: "R260", tone: "dim" },
+      { text: "W60", tone: "dim" },
+      { text: "CH33.3%", tone: "dim" },
+      { text: "$1.000", tone: "dim" },
+      { text: "81.8% (200k auto)", tone: "dim" },
+    ]);
+  });
+
   it("formats token boundaries exactly", () => {
     expect(
       [

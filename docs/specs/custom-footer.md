@@ -11,8 +11,8 @@ The custom footer replaces Pi's built-in footer with session usage, context capa
 The footer shows:
 
 - the working directory, contracting the home directory itself or a true descendant to `~`, followed by an available Git branch and session name;
-- cumulative input, output, cache-read, cache-write, latest-request cache-hit percentage, and cost across all assistant entries, including compacted history;
-- `(sub)` beside cost when the current model uses OAuth subscription credentials;
+- cumulative input, output, cache-read, cache-write, and cost across assistant messages, tool results, compaction summaries, and branch summaries, with latest-request cache-hit percentage derived only from assistant messages;
+- `(sub)` beside cost when the current model uses OAuth subscription credentials or the subscription-backed Kimi Coding provider;
 - remaining context as a percentage and context-window size, with the automatic-compaction indicator only when enabled state is explicitly known;
 - the current model and, for reasoning models, the selected thinking level including `thinking off`;
 - the provider when more than one provider is available and the terminal has room;
@@ -21,7 +21,7 @@ The footer shows:
 
 Unknown remaining context is displayed as `?`. Remaining context at or below 30% is a warning and at or below 10% is an error. Until a first rate-limit refresh succeeds, the footer shows no loading or unavailable placeholder. Display fields that can contain external text are kept to one line; carriage returns, line feeds, and tabs become spaces, repeated spaces collapse, and empty statuses are omitted.
 
-Token counts use compact integer, `k`, or `M` forms appropriate to their scale. Monetary totals use three decimal places, and cache-hit and context percentages use one decimal place. Pi 0.80 does not expose automatic-compaction state through its public extension boundary, so the native adapter conservatively omits the `auto` indicator.
+Token counts use compact integer, `k`, or `M` forms appropriate to their scale. Monetary totals use three decimal places, and cache-hit and context percentages use one decimal place. Pi does not expose automatic-compaction state through its public extension boundary, so the native adapter conservatively omits the `auto` indicator.
 
 ## Terminal Cells and Styling
 

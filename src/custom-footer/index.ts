@@ -89,6 +89,8 @@ export const buildNativeFooterRenderInput = (
   input: NativeFooterRenderInput,
 ): FooterRenderInput => ({
   ...input,
+  usingSubscription:
+    input.usingSubscription || input.model?.provider === "kimi-coding",
   autoCompactEnabled: false,
 });
 
@@ -254,26 +256,8 @@ const toFooterContext = (
   getRenderInput: (footerData, rateLimitStatus) => {
     const model = context.model;
     const contextUsage = context.getContextUsage();
-    const entries: FooterRenderInput["entries"] = context.sessionManager
-      .getEntries()
-      .map((entry) => {
-        if (entry.type === "message" && entry.message.role === "assistant") {
-          return {
-            type: "message",
-            message: {
-              role: "assistant",
-              usage: {
-                input: entry.message.usage.input,
-                output: entry.message.usage.output,
-                cacheRead: entry.message.usage.cacheRead,
-                cacheWrite: entry.message.usage.cacheWrite,
-                cost: { total: entry.message.usage.cost.total },
-              },
-            },
-          };
-        }
-        return { type: entry.type };
-      });
+    const entries: FooterRenderInput["entries"] =
+      context.sessionManager.getEntries();
 
     return buildNativeFooterRenderInput({
       cwd: context.sessionManager.getCwd(),

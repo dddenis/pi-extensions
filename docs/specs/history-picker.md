@@ -28,7 +28,7 @@ Saved history comes from Pi's public all-session listing. Each listed JSONL file
 
 Saved-session indexing is shared across picker invocations. Concurrent refresh callers join a single flight, while listeners receive loading and completed snapshots. Unchanged files reuse cached projections by modification time; changed files are reread. A successful listing evicts paths no longer present, including a successful empty listing.
 
-In Pi 0.80.6, public `SessionManager.listAll()` can convert some host listing failures to `[]`. The live adapter has no failure discriminator and must treat that return as a successful empty listing, so such host failures can evict the cache. Only typed `SessionListingService` failures preserve the previous cache and report saved sessions as unavailable.
+Pi's public `SessionManager.listAll()` can convert some host listing failures to `[]`. The live adapter has no failure discriminator and must treat that return as a successful empty listing, so such host failures can evict the cache. Only typed `SessionListingService` failures preserve the previous cache and report saved sessions as unavailable.
 
 Stat, read, or schema failure retains a prior valid projection for that path, omits an invalid new path, and reports the number of unreadable saved sessions. These warnings remain visible alongside usable current and cached results.
 

@@ -15,6 +15,7 @@ export interface FooterEntry {
     readonly role: string;
     readonly usage?: FooterUsage;
   };
+  readonly usage?: FooterUsage;
 }
 
 export interface FooterContextUsage {
@@ -145,7 +146,14 @@ export const buildFooterRenderData = (
 
   for (const entry of input.entries) {
     const message = entry.type === "message" ? entry.message : undefined;
-    const usage = message?.role === "assistant" ? message.usage : undefined;
+    const assistantUsage =
+      message?.role === "assistant" ? message.usage : undefined;
+    const usage =
+      assistantUsage ??
+      (message?.role === "toolResult" ? message.usage : undefined) ??
+      (entry.type === "compaction" || entry.type === "branch_summary"
+        ? entry.usage
+        : undefined);
     if (usage === undefined) continue;
 
     totalInput += safeNumber(usage.input);
@@ -153,13 +161,15 @@ export const buildFooterRenderData = (
     totalCacheRead += safeNumber(usage.cacheRead);
     totalCacheWrite += safeNumber(usage.cacheWrite);
     totalCost += safeNumber(usage.cost.total);
+    if (assistantUsage === undefined) continue;
+
     const promptTokens =
-      safeNumber(usage.input) +
-      safeNumber(usage.cacheRead) +
-      safeNumber(usage.cacheWrite);
+      safeNumber(assistantUsage.input) +
+      safeNumber(assistantUsage.cacheRead) +
+      safeNumber(assistantUsage.cacheWrite);
     latestCacheHitRate =
       promptTokens > 0
-        ? (safeNumber(usage.cacheRead) / promptTokens) * 100
+        ? (safeNumber(assistantUsage.cacheRead) / promptTokens) * 100
         : undefined;
   }
 

@@ -237,6 +237,24 @@ describe("custom footer Pi boundary", () => {
     );
   });
 
+  it("treats Kimi Coding as subscription-backed without OAuth", () => {
+    const renderInput = buildNativeFooterRenderInput({
+      cwd: "/home/me/project",
+      entries: [],
+      model: {
+        id: "kimi-for-coding",
+        provider: "kimi-coding",
+        reasoning: true,
+        contextWindow: 262_144,
+      },
+      availableProviderCount: 1,
+      extensionStatuses: new Map(),
+      usingSubscription: false,
+    });
+
+    expect(renderInput.usingSubscription).toBe(true);
+  });
+
   it("does not install or start in RPC even when feedback exists", async () => {
     const harness = makeHarness("rpc");
     await harness.start();
