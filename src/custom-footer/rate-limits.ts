@@ -372,13 +372,26 @@ const formatReset = (
     ),
   );
 
+const fiveHourWindowDurationMinutes = 5 * 60;
+const weeklyWindowDurationMinutes = 7 * 24 * 60;
+
+const windowLabel = (
+  fallback: string,
+  durationMinutes: number | null | undefined,
+): string => {
+  if (durationMinutes === fiveHourWindowDurationMinutes) return "5h";
+  if (durationMinutes === weeklyWindowDurationMinutes) return "wk";
+  return fallback;
+};
+
 const formatWindow = (
-  label: string,
+  fallbackLabel: string,
   window: RateLimitWindow | null | undefined,
   now: DateTime.DateTime,
 ): Option.Option<string> => {
   if (window == null) return Option.none();
 
+  const label = windowLabel(fallbackLabel, window.windowDurationMins);
   const remainingPercent = Math.max(
     0,
     Math.min(100, Math.round(100 - window.usedPercent)),

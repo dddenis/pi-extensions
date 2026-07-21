@@ -252,6 +252,46 @@ describe("OpenAI rate-limit formatting", () => {
     ).toBe("OpenAI 5h 99% ↺2h | wk 92% ↺5d");
   });
 
+  it("labels a weekly-only primary window from its reported duration", () => {
+    expect(
+      formatOpenAiRateLimitStatus(
+        {
+          primary: {
+            usedPercent: 8,
+            windowDurationMins: 10_080,
+            resetsAt: nowEpochSeconds + 432_000,
+          },
+          secondary: null,
+        },
+        now,
+      ),
+    ).toBe("OpenAI wk 92% ↺5d");
+  });
+
+  it("labels a five-hour secondary window from its reported duration", () => {
+    expect(
+      formatOpenAiRateLimitStatus(
+        {
+          primary: null,
+          secondary: { usedPercent: 25, windowDurationMins: 5 * 60 },
+        },
+        now,
+      ),
+    ).toBe("OpenAI 5h 75%");
+  });
+
+  it("retains positional labels for unrecognized reported durations", () => {
+    expect(
+      formatOpenAiRateLimitStatus(
+        {
+          primary: { usedPercent: 25, windowDurationMins: 10_079 },
+          secondary: { usedPercent: 50, windowDurationMins: 301 },
+        },
+        now,
+      ),
+    ).toBe("OpenAI 5h 75% | wk 50%");
+  });
+
   it("rounds and clamps remaining percentages", () => {
     expect(
       formatOpenAiRateLimitStatus(
