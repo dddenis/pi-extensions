@@ -5,13 +5,14 @@ This directory contains checked-in contracts for the `pi-extensions` repository.
 ## Spec Map
 
 - [Architecture](./architecture.md) — repository boundaries, TypeScript scopes, test layout, package scripts, and internal CLI organization.
+- [File System Service](./file-system.md) — typed shared-file reads and controlled private-file publication and removal.
 - [Extensions](./extensions.md) — extension source shape, manifest discovery, runtime dependencies, global linking, and validation.
 - [Kit CLI](./kit-cli.md) — internal `kit` command surface and command-level behavior.
 - [Context Repositories](./context-repos.md) — managed `.context` sources, dependency pinning, and synchronization semantics.
 - [Process Service](./process-service.md) — typed child-process boundary, output streams, terminal ownership, and bounded cleanup.
 - [Custom Footer](./custom-footer.md) — TUI footer content, OpenAI limit refresh, stale/backoff behavior, and scoped process lifecycle.
 - [Test Services](./test-services.md) — reusable Effect test-service contracts.
-- [Attention Hooks](./attention-hooks.md) — settled-run and subagent-attention audio notifications, suppression, path resolution, and lifecycle cleanup.
+- [Attention Hooks](./attention-hooks.md) — settled-run, dialog, and subagent attention signals; audio notifications; tmux pane markers; suppression; and lifecycle cleanup.
 - [History Picker](./history-picker.md) — Ctrl+R interaction, saved-session indexing/cache semantics, fuzzy search, scrolling, and lifecycle cleanup.
 
 ## Change Rules

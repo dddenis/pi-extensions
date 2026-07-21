@@ -1,8 +1,22 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import {
+  type FileHandle,
+  access,
+  open,
+  readFile,
+  rename,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import { Context, Data, Effect, Layer } from "effect";
 
-export type FileSystemOperation = "exists" | "statMtimeMs" | "readTextFile";
+export type FileSystemOperation =
+  | "exists"
+  | "statMtimeMs"
+  | "readTextFile"
+  | "replaceWithPrivateEmptyFile"
+  | "removeFile";
 
 export class FileSystemError extends Data.TaggedError("FileSystemError")<{
   readonly operation: FileSystemOperation;
@@ -18,6 +32,10 @@ export interface FileSystemService {
   readonly readTextFile: (
     path: string,
   ) => Effect.Effect<string, FileSystemError>;
+  readonly replaceWithPrivateEmptyFile: (
+    path: string,
+  ) => Effect.Effect<void, FileSystemError>;
+  readonly removeFile: (path: string) => Effect.Effect<void, FileSystemError>;
 }
 
 const FileSystemServiceTag = Context.GenericTag<FileSystemService>(
@@ -29,6 +47,56 @@ const isMissingFile = (cause: unknown): boolean =>
   cause !== null &&
   "code" in cause &&
   cause.code === "ENOENT";
+
+const privateFileMode = 0o600;
+
+const unlinkIfPresent = async (filePath: string): Promise<void> => {
+  try {
+    await unlink(filePath);
+  } catch (cause) {
+    if (!isMissingFile(cause)) throw cause;
+  }
+};
+
+const replaceWithPrivateEmptyFile = async (filePath: string): Promise<void> => {
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: FileHandle | undefined;
+  let published = false;
+  try {
+    handle = await open(
+      temporaryPath,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_WRONLY |
+        constants.O_NOFOLLOW,
+      privateFileMode,
+    );
+    await handle.truncate(0);
+    await handle.chmod(privateFileMode);
+
+    const currentUid = process.getuid?.();
+    const metadata = await handle.stat();
+    if (
+      currentUid === undefined ||
+      !metadata.isFile() ||
+      metadata.size !== 0 ||
+      metadata.uid !== currentUid ||
+      (metadata.mode & 0o777) !== privateFileMode
+    ) {
+      throw new Error("private empty file metadata validation failed");
+    }
+
+    await handle.close();
+    handle = undefined;
+    await rename(temporaryPath, filePath);
+    published = true;
+  } finally {
+    if (handle !== undefined) {
+      await handle.close().catch(() => undefined);
+    }
+    if (!published) await unlinkIfPresent(temporaryPath);
+  }
+};
 
 class FileAccessError extends Data.TaggedError("FileAccessError")<{
   readonly cause: unknown;
@@ -67,6 +135,17 @@ export const FileSystemService = Object.assign(FileSystemServiceTag, {
       Effect.tryPromise({
         try: () => readFile(filePath, "utf8"),
         catch: (cause) => toFileSystemError("readTextFile", filePath, cause),
+      }),
+    replaceWithPrivateEmptyFile: (filePath) =>
+      Effect.tryPromise({
+        try: () => replaceWithPrivateEmptyFile(filePath),
+        catch: (cause) =>
+          toFileSystemError("replaceWithPrivateEmptyFile", filePath, cause),
+      }),
+    removeFile: (filePath) =>
+      Effect.tryPromise({
+        try: () => unlinkIfPresent(filePath),
+        catch: (cause) => toFileSystemError("removeFile", filePath, cause),
       }),
   } satisfies FileSystemService),
 });

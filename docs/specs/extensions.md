@@ -16,7 +16,7 @@ When `<agent-dir>/extensions` has an immutable or declaratively managed parent, 
 
 ## Current Extensions
 
-- [Attention hooks](./attention-hooks.md) provides audio notifications for settled runs and subagent attention.
+- [Attention hooks](./attention-hooks.md) provides audio notifications and interactive tmux pane markers for settled runs, dialogs, and subagent attention.
 - [Custom footer](./custom-footer.md) provides the interactive TUI footer and OpenAI limit status.
 - [History picker](./history-picker.md) provides interactive search across current and saved user messages.
 

@@ -10,10 +10,16 @@ export type FileSystemServiceTestFailures = ReadonlyMap<
   ReadonlyMap<string, FileSystemError>
 >;
 
+export interface FileSystemServiceTestPrivateFile {
+  readonly contents: "";
+  readonly mode: number;
+}
+
 export interface FileSystemServiceTestConfig {
   readonly exists?: ReadonlyMap<string, boolean>;
   readonly mtimes?: ReadonlyMap<string, number>;
   readonly contents?: ReadonlyMap<string, string>;
+  readonly privateFiles?: ReadonlyMap<string, FileSystemServiceTestPrivateFile>;
   readonly failures?: FileSystemServiceTestFailures;
 }
 
@@ -27,6 +33,7 @@ export interface FileSystemServiceTestState {
   readonly exists: ReadonlyMap<string, boolean>;
   readonly mtimes: ReadonlyMap<string, number>;
   readonly contents: ReadonlyMap<string, string>;
+  readonly privateFiles: ReadonlyMap<string, FileSystemServiceTestPrivateFile>;
   readonly failures: FileSystemServiceTestFailures;
 }
 
@@ -57,6 +64,10 @@ type Resolution<A> =
   | { readonly _tag: "Failure"; readonly error: FileSystemError }
   | { readonly _tag: "Unconfigured" };
 
+type MutationResolution =
+  | { readonly _tag: "Success" }
+  | { readonly _tag: "Failure"; readonly error: FileSystemError };
+
 const cloneError = (error: FileSystemError): FileSystemError =>
   new FileSystemError({
     operation: error.operation,
@@ -79,6 +90,19 @@ const copyFailures = (
     ]),
   );
 
+const copyPrivateFiles = (
+  privateFiles:
+    ReadonlyMap<string, FileSystemServiceTestPrivateFile> | undefined,
+): ReadonlyMap<string, FileSystemServiceTestPrivateFile> =>
+  new Map(
+    [...(privateFiles ?? new Map())].map(
+      ([path, file]): readonly [string, FileSystemServiceTestPrivateFile] => [
+        path,
+        { contents: file.contents, mode: file.mode },
+      ],
+    ),
+  );
+
 const makeInitialState = (
   config: FileSystemServiceTestConfig = {},
 ): FileSystemServiceTestInternalState => ({
@@ -86,6 +110,7 @@ const makeInitialState = (
   exists: new Map(config.exists),
   mtimes: new Map(config.mtimes),
   contents: new Map(config.contents),
+  privateFiles: copyPrivateFiles(config.privateFiles),
   failures: copyFailures(config.failures),
 });
 
@@ -98,6 +123,7 @@ const snapshotState = (
       exists: new Map(state.exists),
       mtimes: new Map(state.mtimes),
       contents: new Map(state.contents),
+      privateFiles: copyPrivateFiles(state.privateFiles),
       failures: copyFailures(state.failures),
     })),
   );
@@ -141,6 +167,37 @@ const resolve = <A>(
     }),
   );
 
+const mutate = (
+  ref: FileSystemServiceTestRef,
+  operation: FileSystemOperation,
+  path: string,
+  update: (
+    privateFiles: ReadonlyMap<string, FileSystemServiceTestPrivateFile>,
+  ) => ReadonlyMap<string, FileSystemServiceTestPrivateFile>,
+): Effect.Effect<void, FileSystemError> =>
+  Ref.modify<FileSystemServiceTestInternalState, MutationResolution>(
+    ref,
+    (state) => {
+      const nextState = {
+        ...state,
+        calls: [...state.calls, { operation, path }],
+      };
+      const failure = state.failures.get(operation)?.get(path);
+      return failure === undefined
+        ? [
+            { _tag: "Success" },
+            { ...nextState, privateFiles: update(state.privateFiles) },
+          ]
+        : [{ _tag: "Failure", error: cloneError(failure) }, nextState];
+    },
+  ).pipe(
+    Effect.flatMap((resolution) =>
+      resolution._tag === "Success"
+        ? Effect.void
+        : Effect.fail(resolution.error),
+    ),
+  );
+
 const makeFileSystemService = (
   ref: FileSystemServiceTestRef,
 ): FileSystemService => ({
@@ -149,6 +206,18 @@ const makeFileSystemService = (
     resolve(ref, "statMtimeMs", path, (state) => state.mtimes),
   readTextFile: (path) =>
     resolve(ref, "readTextFile", path, (state) => state.contents),
+  replaceWithPrivateEmptyFile: (path) =>
+    mutate(ref, "replaceWithPrivateEmptyFile", path, (privateFiles) => {
+      const next = new Map(privateFiles);
+      next.set(path, { contents: "", mode: 0o600 });
+      return next;
+    }),
+  removeFile: (path) =>
+    mutate(ref, "removeFile", path, (privateFiles) => {
+      const next = new Map(privateFiles);
+      next.delete(path);
+      return next;
+    }),
 });
 
 const setPathValue = <A>(

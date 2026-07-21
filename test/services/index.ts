@@ -17,6 +17,7 @@ export type {
   FileSystemServiceTestCall,
   FileSystemServiceTestConfig,
   FileSystemServiceTestFailures,
+  FileSystemServiceTestPrivateFile,
   FileSystemServiceTestService,
   FileSystemServiceTestState,
 } from "./file-system";

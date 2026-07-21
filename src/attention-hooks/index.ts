@@ -1,6 +1,7 @@
 import type {
   AgentEndEvent,
   ExtensionAPI,
+  ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   Data,
@@ -23,6 +24,15 @@ import {
   isNeedsAttention,
   playAttentionSound,
 } from "./notification";
+import { makeTmuxMarker, type TmuxMarker } from "./tmux-marker";
+import {
+  installUiWaitObserver,
+  isUserInputWaitEvent,
+  type ObservedExtensionUI,
+  type StandardWaitToken,
+} from "./ui-wait-observer";
+
+type ExtensionMode = ExtensionContext["mode"];
 
 type AttentionHooksDependencies =
   | EnvironmentService
@@ -33,14 +43,24 @@ type AttentionHooksDependencies =
 type AsyncHandler = () => Promise<void>;
 type AgentEndHandler = (event: AgentEndEvent) => Promise<void>;
 type ControlEventHandler = (payload: unknown) => Promise<void>;
+type EventSubscription = (handler: ControlEventHandler) => () => void;
+
+export interface AttentionHooksSession {
+  readonly mode: ExtensionMode;
+  readonly ui: ObservedExtensionUI;
+}
 
 export interface AttentionHooksRegistrationPort {
-  readonly onSessionStart: (handler: AsyncHandler) => void;
+  readonly onSessionStart: (
+    handler: (session: AttentionHooksSession) => Promise<void>,
+  ) => void;
+  readonly onInput: (handler: AsyncHandler) => void;
   readonly onAgentStart: (handler: AsyncHandler) => void;
   readonly onAgentEnd: (handler: AgentEndHandler) => void;
   readonly onAgentSettled: (handler: AsyncHandler) => void;
   readonly onSessionShutdown: (handler: AsyncHandler) => void;
   readonly subscribeControlEvent: (handler: ControlEventHandler) => () => void;
+  readonly subscribeUserInputWait: (handler: ControlEventHandler) => () => void;
 }
 
 export interface AttentionHooksRunner {
@@ -54,16 +74,34 @@ interface GenerationToken {
   active: boolean;
 }
 
+interface AttentionReasons {
+  readonly settledRun: boolean;
+  readonly subagent: boolean;
+  readonly standardWaits: ReadonlySet<StandardWaitToken>;
+  readonly customWaits: ReadonlySet<string>;
+}
+
+const emptyReasons = (): AttentionReasons => ({
+  settledRun: false,
+  subagent: false,
+  standardWaits: new Set(),
+  customWaits: new Set(),
+});
+
+const needsAttention = (reasons: AttentionReasons): boolean =>
+  reasons.settledRun ||
+  reasons.subagent ||
+  reasons.standardWaits.size > 0 ||
+  reasons.customWaits.size > 0;
+
 interface AttentionHooksGeneration {
   readonly id: number;
   readonly token: GenerationToken;
   readonly listenerScope: Scope.CloseableScope;
   readonly workScope: Scope.CloseableScope;
-}
-
-interface AttentionHooksLifecycleState {
-  readonly phase: "open" | "transitioning" | "closed";
-  readonly generation: AttentionHooksGeneration;
+  readonly reasons: Ref.Ref<AttentionReasons>;
+  readonly reasonMutex: Effect.Semaphore;
+  readonly marker: TmuxMarker;
 }
 
 class AttentionHooksSubscriptionError extends Data.TaggedError(
@@ -97,10 +135,22 @@ export const registerAttentionHooks = async (
     Ref.make<Option.Option<boolean>>(Option.none()),
   );
   const rootScope = await runner.runPromise(Scope.make());
+  const currentGeneration = await runner.runPromise(
+    Ref.make<Option.Option<AttentionHooksGeneration>>(Option.none()),
+  );
+  const lifecycleMutex = await runner.runPromise(Effect.makeSemaphore(1));
+  let nextGenerationId = 0;
+  let closed = false;
+  let shutdownPromise: Promise<void> | undefined;
 
   const makeGeneration = (
     id: number,
-  ): Effect.Effect<AttentionHooksGeneration> =>
+    session: AttentionHooksSession,
+  ): Effect.Effect<
+    AttentionHooksGeneration,
+    never,
+    AttentionHooksDependencies
+  > =>
     Effect.gen(function* () {
       const listenerScope = yield* Scope.fork(
         rootScope,
@@ -110,77 +160,122 @@ export const registerAttentionHooks = async (
         rootScope,
         ExecutionStrategy.sequential,
       );
+      const reasons = yield* Ref.make(emptyReasons());
+      const reasonMutex = yield* Effect.makeSemaphore(1);
+      const marker = yield* makeTmuxMarker(session.mode);
       return {
         id,
         token: { active: false },
         listenerScope,
         workScope,
-      };
+        reasons,
+        reasonMutex,
+        marker,
+      } satisfies AttentionHooksGeneration;
     });
 
-  const initialGeneration = await runner.runPromise(makeGeneration(0));
-  initialGeneration.token.active = true;
-  const lifecycleState = await runner.runPromise(
-    Ref.make<AttentionHooksLifecycleState>({
-      phase: "open",
-      generation: initialGeneration,
-    }),
-  );
-  const lifecycleMutex = await runner.runPromise(Effect.makeSemaphore(1));
-  let closed = false;
-  let shutdownPromise: Promise<void> | undefined;
+  type GenerationWork = (
+    generation: AttentionHooksGeneration,
+  ) => Effect.Effect<void, never, AttentionHooksDependencies>;
 
   const launch = (
-    effect: Effect.Effect<void, never, AttentionHooksDependencies>,
+    work: GenerationWork,
     expectedGeneration?: number,
   ): Promise<void> => {
     if (closed) return Promise.resolve();
 
     return runner.runPromise(
-      Ref.get(lifecycleState).pipe(
-        Effect.flatMap((state) => {
-          if (
-            state.phase !== "open" ||
-            !state.generation.token.active ||
-            (expectedGeneration !== undefined &&
-              state.generation.id !== expectedGeneration)
-          ) {
-            return Effect.void;
-          }
-
-          return Effect.forkIn(
-            effect.pipe(Effect.catchAllCause(() => Effect.void)),
-            state.generation.workScope,
-          ).pipe(Effect.flatMap(Fiber.await), Effect.asVoid);
-        }),
+      Ref.get(currentGeneration).pipe(
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (generation) => {
+              if (
+                !generation.token.active ||
+                (expectedGeneration !== undefined &&
+                  generation.id !== expectedGeneration)
+              ) {
+                return Effect.void;
+              }
+              return Effect.forkIn(
+                work(generation).pipe(Effect.catchAllCause(() => Effect.void)),
+                generation.workScope,
+              ).pipe(Effect.flatMap(Fiber.await), Effect.asVoid);
+            },
+          }),
+        ),
         Effect.catchAllCause(() => Effect.void),
       ),
     );
   };
 
-  const closeGeneration = (
+  const updateReasons = (
     generation: AttentionHooksGeneration,
+    update: (current: AttentionReasons) => AttentionReasons,
   ): Effect.Effect<void> =>
-    Scope.close(generation.listenerScope, Exit.void).pipe(
-      Effect.zipRight(Ref.set(pendingCompletion, Option.none())),
-      Effect.zipRight(Scope.close(generation.workScope, Exit.void)),
+    generation.reasonMutex.withPermits(1)(
+      Ref.updateAndGet(generation.reasons, update).pipe(
+        Effect.flatMap((next) =>
+          generation.marker.setWaiting(needsAttention(next)),
+        ),
+      ),
     );
 
-  const installControlSubscription = (
+  const clearPassive = (generation: AttentionHooksGeneration) =>
+    updateReasons(generation, (current) => ({
+      ...current,
+      settledRun: false,
+      subagent: false,
+    }));
+
+  const beginStandardWait = (
     generation: AttentionHooksGeneration,
+    token: StandardWaitToken,
+  ) =>
+    updateReasons(generation, (current) => ({
+      ...current,
+      settledRun: false,
+      subagent: false,
+      standardWaits: new Set([...current.standardWaits, token]),
+    }));
+
+  const endStandardWait = (
+    generation: AttentionHooksGeneration,
+    token: StandardWaitToken,
+  ) =>
+    updateReasons(generation, (current) => {
+      const standardWaits = new Set(current.standardWaits);
+      standardWaits.delete(token);
+      return { ...current, standardWaits };
+    });
+
+  const beginCustomWait = (generation: AttentionHooksGeneration, id: string) =>
+    updateReasons(generation, (current) => {
+      if (current.customWaits.has(id)) return current;
+      return {
+        ...current,
+        settledRun: false,
+        subagent: false,
+        customWaits: new Set([...current.customWaits, id]),
+      };
+    });
+
+  const endCustomWait = (generation: AttentionHooksGeneration, id: string) =>
+    updateReasons(generation, (current) => {
+      const customWaits = new Set(current.customWaits);
+      customWaits.delete(id);
+      return { ...current, customWaits };
+    });
+
+  const installSubscription = (
+    scope: Scope.CloseableScope,
+    subscribe: EventSubscription,
+    handler: ControlEventHandler,
   ): Effect.Effect<void, AttentionHooksSubscriptionError> =>
     Scope.extend(
       Effect.acquireRelease(
         Effect.try({
-          try: () =>
-            port.subscribeControlEvent((payload) => {
-              if (closed || !generation.token.active) {
-                return Promise.resolve();
-              }
-              return isNeedsAttention(payload)
-                ? launch(playAttentionSound, generation.id)
-                : Promise.resolve();
-            }),
+          try: () => subscribe(handler),
           catch: (cause) => subscriptionError("subscribe", cause),
         }),
         (unsubscribe) =>
@@ -189,53 +284,156 @@ export const registerAttentionHooks = async (
             catch: (cause) => subscriptionError("unsubscribe", cause),
           }).pipe(Effect.ignore),
       ).pipe(Effect.asVoid),
-      generation.listenerScope,
+      scope,
     );
 
-  const replaceGeneration = lifecycleMutex.withPermits(1)(
+  const signalSubagentAttention = (generation: AttentionHooksGeneration) =>
+    Effect.all(
+      [
+        updateReasons(generation, (current) => ({
+          ...current,
+          subagent: true,
+        })),
+        playAttentionSound,
+      ],
+      { concurrency: "unbounded" },
+    ).pipe(Effect.asVoid);
+
+  const installControlSubscription = (
+    generation: AttentionHooksGeneration,
+  ): Effect.Effect<void, AttentionHooksSubscriptionError> =>
+    installSubscription(
+      generation.listenerScope,
+      (handler) => port.subscribeControlEvent(handler),
+      (payload) => {
+        if (closed || !generation.token.active) return Promise.resolve();
+        return isNeedsAttention(payload)
+          ? launch(signalSubagentAttention, generation.id)
+          : Promise.resolve();
+      },
+    );
+
+  const installCustomWaitSubscription = (
+    generation: AttentionHooksGeneration,
+  ): Effect.Effect<void, AttentionHooksSubscriptionError> =>
+    installSubscription(
+      generation.listenerScope,
+      (handler) => port.subscribeUserInputWait(handler),
+      (payload) => {
+        if (closed || !generation.token.active) return Promise.resolve();
+        if (!isUserInputWaitEvent(payload)) return Promise.resolve();
+        return payload.state === "start"
+          ? launch(
+              (current) => beginCustomWait(current, payload.id),
+              generation.id,
+            )
+          : launch(
+              (current) => endCustomWait(current, payload.id),
+              generation.id,
+            );
+      },
+    );
+
+  const installStandardUiObserver = (
+    generation: AttentionHooksGeneration,
+    ui: ObservedExtensionUI,
+  ): Effect.Effect<void, AttentionHooksSubscriptionError> =>
+    generation.marker.interactiveRoot
+      ? Scope.extend(
+          Effect.acquireRelease(
+            Effect.try({
+              try: () =>
+                installUiWaitObserver(ui, {
+                  beginStandardWait: (token) =>
+                    launch(
+                      (current) => beginStandardWait(current, token),
+                      generation.id,
+                    ),
+                  endStandardWait: (token) =>
+                    launch(
+                      (current) => endStandardWait(current, token),
+                      generation.id,
+                    ),
+                }),
+              catch: (cause) => subscriptionError("subscribe", cause),
+            }),
+            (dispose) =>
+              Effect.try({
+                try: dispose,
+                catch: (cause) => subscriptionError("unsubscribe", cause),
+              }).pipe(Effect.ignore),
+          ).pipe(Effect.asVoid),
+          generation.listenerScope,
+        )
+      : Effect.void;
+
+  const bestEffort = <R>(
+    effect: Effect.Effect<void, never, R>,
+  ): Effect.Effect<void, never, R> =>
+    effect.pipe(Effect.catchAllCause(() => Effect.void));
+
+  const resetGeneration = (generation: AttentionHooksGeneration) =>
+    generation.reasonMutex.withPermits(1)(
+      Ref.set(generation.reasons, emptyReasons()).pipe(
+        Effect.zipRight(generation.marker.setWaiting(false)),
+      ),
+    );
+
+  const closeGeneration = (generation: AttentionHooksGeneration) =>
     Effect.gen(function* () {
-      const current = yield* Ref.get(lifecycleState);
-      if (current.phase === "closed") return;
+      generation.token.active = false;
+      yield* bestEffort(Scope.close(generation.listenerScope, Exit.void));
+      yield* bestEffort(Scope.close(generation.workScope, Exit.void));
+      yield* Ref.set(pendingCompletion, Option.none());
+      yield* bestEffort(resetGeneration(generation));
+    });
 
-      current.generation.token.active = false;
-      yield* Ref.set(lifecycleState, {
-        phase: "transitioning",
-        generation: current.generation,
-      } satisfies AttentionHooksLifecycleState);
-      yield* closeGeneration(current.generation);
+  const replaceGeneration = (session: AttentionHooksSession) =>
+    lifecycleMutex.withPermits(1)(
+      Effect.gen(function* () {
+        const previous = yield* Ref.get(currentGeneration);
+        if (Option.isSome(previous)) yield* closeGeneration(previous.value);
 
-      const next = yield* makeGeneration(current.generation.id + 1);
-      yield* Ref.set(lifecycleState, {
-        phase: "open",
-        generation: next,
-      } satisfies AttentionHooksLifecycleState);
-      yield* installControlSubscription(next);
-      next.token.active = true;
-    }),
-  );
+        const next = yield* makeGeneration(nextGenerationId, session);
+        nextGenerationId += 1;
+        yield* Ref.set(currentGeneration, Option.some(next));
+        yield* next.marker.setWaiting(false);
+        yield* installControlSubscription(next);
+        yield* installCustomWaitSubscription(next);
+        yield* installStandardUiObserver(next, session.ui);
+        next.token.active = true;
+      }),
+    );
 
   const shutdown = lifecycleMutex.withPermits(1)(
     Effect.gen(function* () {
-      const current = yield* Ref.get(lifecycleState);
-      if (current.phase === "closed") return;
-
-      current.generation.token.active = false;
-      yield* Ref.set(lifecycleState, {
-        phase: "closed",
-        generation: current.generation,
-      } satisfies AttentionHooksLifecycleState);
-      yield* closeGeneration(current.generation);
-    }).pipe(Effect.ensuring(Scope.close(rootScope, Exit.void))),
+      const current = yield* Ref.getAndSet(currentGeneration, Option.none());
+      if (Option.isSome(current)) yield* closeGeneration(current.value);
+    }).pipe(Effect.ensuring(bestEffort(Scope.close(rootScope, Exit.void)))),
   );
 
-  port.onSessionStart(() =>
-    closed ? Promise.resolve() : runner.runPromise(replaceGeneration),
+  port.onSessionStart((session) =>
+    closed ? Promise.resolve() : runner.runPromise(replaceGeneration(session)),
   );
 
-  port.onAgentStart(() => launch(Ref.set(pendingCompletion, Option.none())));
+  port.onInput(() =>
+    launch((generation) =>
+      Ref.set(pendingCompletion, Option.none()).pipe(
+        Effect.zipRight(clearPassive(generation)),
+      ),
+    ),
+  );
+
+  port.onAgentStart(() =>
+    launch((generation) =>
+      Ref.set(pendingCompletion, Option.none()).pipe(
+        Effect.zipRight(clearPassive(generation)),
+      ),
+    ),
+  );
 
   port.onAgentEnd((event) =>
-    launch(
+    launch(() =>
       Ref.set(
         pendingCompletion,
         Option.some(completionShouldNotify(event.messages)),
@@ -244,13 +442,24 @@ export const registerAttentionHooks = async (
   );
 
   port.onAgentSettled(() =>
-    launch(
+    launch((generation) =>
       Ref.getAndSet(pendingCompletion, Option.none()).pipe(
         Effect.flatMap(
           Option.match({
             onNone: () => Effect.void,
             onSome: (shouldNotify) =>
-              shouldNotify ? playAttentionSound : Effect.void,
+              shouldNotify
+                ? Effect.all(
+                    [
+                      updateReasons(generation, (current) => ({
+                        ...current,
+                        settledRun: true,
+                      })),
+                      playAttentionSound,
+                    ],
+                    { concurrency: "unbounded" },
+                  ).pipe(Effect.asVoid)
+                : Effect.void,
           }),
         ),
       ),
@@ -274,7 +483,11 @@ export default async function attentionHooksExtension(pi: ExtensionAPI) {
   const runner = makeEffectRunner(AttentionHooksLiveLayer);
   await registerAttentionHooks(
     {
-      onSessionStart: (handler) => pi.on("session_start", () => handler()),
+      onSessionStart: (handler) =>
+        pi.on("session_start", (_event, ctx) =>
+          handler({ mode: ctx.mode, ui: ctx.ui }),
+        ),
+      onInput: (handler) => pi.on("input", () => handler()),
       onAgentStart: (handler) => pi.on("agent_start", () => handler()),
       onAgentEnd: (handler) => pi.on("agent_end", handler),
       onAgentSettled: (handler) => pi.on("agent_settled", () => handler()),
@@ -282,6 +495,8 @@ export default async function attentionHooksExtension(pi: ExtensionAPI) {
         pi.on("session_shutdown", () => handler()),
       subscribeControlEvent: (handler) =>
         pi.events.on("subagent:control-event", handler),
+      subscribeUserInputWait: (handler) =>
+        pi.events.on("attention-hooks:user-input-wait", handler),
     },
     runner,
   );

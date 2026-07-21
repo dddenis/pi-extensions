@@ -17,3 +17,7 @@ A stateful fake provides the production service tag consumed by application code
 - Stateful fakes expose `getState`, `resetCalls`, and `reset` controls.
 - Production-facing methods die on unimplemented or unconfigured test behavior.
 - Explicit application failures use the same error contract as the production service.
+
+## File System Fake
+
+Successful private-file replacement and removal mutate copied file state. Configured failures are recorded but do not mutate that state. Snapshots copy their maps and per-file records so callers cannot mutate internal state. `resetCalls` preserves files, while `reset` restores a copied initial state.
