@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { AgentEndEvent } from "@earendil-works/pi-coding-agent";
-import { Effect, Schema } from "effect";
+import { Effect } from "effect";
 import { resolveAgentDirectoryEffect } from "../lib/agent-directory";
 import { EnvironmentService } from "../services/environment";
 import { FileSystemService } from "../services/file-system";
@@ -8,12 +8,6 @@ import { ProcessService } from "../services/process";
 
 export const ATTENTION_SOUND_FILE =
   "vittemacop-alert-notification-pop-cartoon-bubble-pop-pop-up-478078.mp3";
-
-const NeedsAttentionPayload = Schema.Struct({
-  event: Schema.Struct({ type: Schema.Literal("needs_attention") }),
-});
-
-export const isNeedsAttention = Schema.is(NeedsAttentionPayload);
 
 export const completionShouldNotify = (
   messages: AgentEndEvent["messages"],

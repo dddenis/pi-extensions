@@ -45,7 +45,7 @@ const agentEnd = (...messages: AgentEndEvent["messages"]): AgentEndEvent => ({
 type AsyncHandler = () => Promise<void>;
 type SessionStartHandler = (session: AttentionHooksSession) => Promise<void>;
 type AgentEndHandler = (event: AgentEndEvent) => Promise<void>;
-type ControlEventHandler = (payload: unknown) => Promise<void>;
+type PayloadEventHandler = (payload: unknown) => Promise<void>;
 
 class TestRegistrationPort implements AttentionHooksRegistrationPort {
   private sessionStart: SessionStartHandler = () => Promise.resolve();
@@ -56,15 +56,13 @@ class TestRegistrationPort implements AttentionHooksRegistrationPort {
   private sessionShutdown: AsyncHandler = () => Promise.resolve();
   private readonly controlListeners: Array<{
     active: boolean;
-    readonly handler: ControlEventHandler;
+    readonly handler: PayloadEventHandler;
   }> = [];
   private readonly customWaitListeners: Array<{
     active: boolean;
-    readonly handler: ControlEventHandler;
+    readonly handler: PayloadEventHandler;
   }> = [];
 
-  subscribeCount = 0;
-  unsubscribeCount = 0;
   customSubscribeCount = 0;
   customUnsubscribeCount = 0;
   private subscribeFailuresRemaining = 0;
@@ -94,31 +92,28 @@ class TestRegistrationPort implements AttentionHooksRegistrationPort {
     this.sessionShutdown = handler;
   }
 
-  subscribeControlEvent(handler: ControlEventHandler): () => void {
+  subscribeControlEvent(handler: PayloadEventHandler): () => void {
+    const listener = { active: true, handler };
+    this.controlListeners.push(listener);
+    return () => {
+      listener.active = false;
+    };
+  }
+
+  subscribeUserInputWait(handler: PayloadEventHandler): () => void {
     if (this.subscribeFailuresRemaining > 0) {
       this.subscribeFailuresRemaining -= 1;
       throw new Error("subscribe failed");
     }
     const listener = { active: true, handler };
-    this.controlListeners.push(listener);
-    this.subscribeCount += 1;
+    this.customWaitListeners.push(listener);
+    this.customSubscribeCount += 1;
     return () => {
       if (!listener.active) return;
       if (this.unsubscribeFailuresRemaining > 0) {
         this.unsubscribeFailuresRemaining -= 1;
         throw new Error("unsubscribe failed");
       }
-      listener.active = false;
-      this.unsubscribeCount += 1;
-    };
-  }
-
-  subscribeUserInputWait(handler: ControlEventHandler): () => void {
-    const listener = { active: true, handler };
-    this.customWaitListeners.push(listener);
-    this.customSubscribeCount += 1;
-    return () => {
-      if (!listener.active) return;
       listener.active = false;
       this.customUnsubscribeCount += 1;
     };
@@ -170,10 +165,6 @@ class TestRegistrationPort implements AttentionHooksRegistrationPort {
         .filter((listener) => listener.active)
         .map((listener) => listener.handler(payload)),
     );
-  }
-
-  latestControlHandler(): ControlEventHandler | undefined {
-    return this.controlListeners.at(-1)?.handler;
   }
 }
 
@@ -424,15 +415,14 @@ describe("registerAttentionHooks", () => {
     await harness.port.fireSessionShutdown();
   });
 
-  it("clears passive settled and subagent reasons on later interaction", async () => {
+  it("clears settled attention on later input or agent start", async () => {
     const harness = await makeHarness();
     await harness.port.fireAgentEnd(agentEnd(assistant("error")));
     await harness.port.fireAgentSettled();
     await harness.port.fireInput();
 
-    await harness.port.emitControlEvent({
-      event: { type: "needs_attention" },
-    });
+    await harness.port.fireAgentEnd(agentEnd(assistant("error")));
+    await harness.port.fireAgentSettled();
     await harness.port.fireAgentStart();
 
     const transitions = harness.markerTransitions();
@@ -552,12 +542,11 @@ describe("registerAttentionHooks", () => {
     await harness.port.fireSessionShutdown();
   });
 
-  it("keeps passive attention across a duplicate custom wait start", async () => {
+  it("keeps settled attention across a duplicate custom wait start", async () => {
     const harness = await makeHarness();
     await harness.port.emitUserInputWait({ state: "start", id: "qa:1" });
-    await harness.port.emitControlEvent({
-      event: { type: "needs_attention" },
-    });
+    await harness.port.fireAgentEnd(agentEnd(assistant("stop")));
+    await harness.port.fireAgentSettled();
     await harness.port.emitUserInputWait({ state: "start", id: "qa:1" });
     await harness.port.emitUserInputWait({ state: "end", id: "qa:1" });
 
@@ -572,23 +561,20 @@ describe("registerAttentionHooks", () => {
     await harness.port.fireSessionShutdown();
   });
 
-  it("suppresses completion and control events for the exact child marker", async () => {
+  it("suppresses completion alerts for the exact child marker", async () => {
     const harness = await makeHarness({ childMarker: "1" });
     await harness.port.fireAgentEnd(agentEnd(assistant("stop")));
     await harness.port.fireAgentSettled();
-    await harness.port.emitControlEvent({
-      event: { type: "needs_attention" },
-    });
     expect(harness.markerTransitions()).toEqual([]);
     expect(harness.getAudioSpawnCount()).toBe(0);
     await harness.port.fireSessionShutdown();
   });
 
-  it("ignores malformed control-event payloads", async () => {
+  it("does not alert for subagent control events", async () => {
     const harness = await makeHarness();
-    await harness.port.emitControlEvent(null);
-    await harness.port.emitControlEvent({ event: { type: "other" } });
-    await harness.port.emitControlEvent({ event: "needs_attention" });
+    await harness.port.emitControlEvent({
+      event: { type: "needs_attention" },
+    });
     expect(harness.markerTransitions()).toEqual([]);
     expect(harness.getAudioSpawnCount()).toBe(0);
     await harness.port.fireSessionShutdown();
@@ -600,8 +586,6 @@ describe("registerAttentionHooks", () => {
     await harness.fireSessionStart();
     harness.resetMarkerTransitions();
 
-    expect(harness.port.subscribeCount).toBe(2);
-    expect(harness.port.unsubscribeCount).toBe(1);
     expect(harness.port.customSubscribeCount).toBe(2);
     expect(harness.port.customUnsubscribeCount).toBe(1);
     expect(harness.ui.select).not.toBe(staleSelect);
@@ -621,13 +605,10 @@ describe("registerAttentionHooks", () => {
     await expect(harness.fireSessionStart()).rejects.toThrow(
       "subscribe failed",
     );
-    expect(harness.port.subscribeCount).toBe(1);
-    expect(harness.port.unsubscribeCount).toBe(1);
     expect(harness.port.customSubscribeCount).toBe(1);
     expect(harness.port.customUnsubscribeCount).toBe(1);
 
     await expect(harness.fireSessionStart()).resolves.toBeUndefined();
-    expect(harness.port.subscribeCount).toBe(2);
     expect(harness.port.customSubscribeCount).toBe(2);
     await harness.port.fireSessionShutdown();
   });
@@ -637,14 +618,12 @@ describe("registerAttentionHooks", () => {
     harness.port.failNextUnsubscribe();
 
     await expect(harness.fireSessionStart()).resolves.toBeUndefined();
-    expect(harness.port.subscribeCount).toBe(2);
     expect(harness.port.customSubscribeCount).toBe(2);
-    expect(harness.port.customUnsubscribeCount).toBe(1);
+    expect(harness.port.customUnsubscribeCount).toBe(0);
+    harness.resetMarkerTransitions();
 
-    await harness.port.emitControlEvent({
-      event: { type: "needs_attention" },
-    });
-    expect(harness.getAudioSpawnCount()).toBe(1);
+    await harness.port.emitUserInputWait({ state: "start", id: "qa:1" });
+    expect(harness.markerTransitions()).toEqual([markerTransition("create")]);
     await harness.port.fireSessionShutdown();
   });
 
@@ -659,15 +638,11 @@ describe("registerAttentionHooks", () => {
       markerTransition("create"),
       markerTransition("remove"),
     ]);
-    expect(harness.port.unsubscribeCount).toBe(1);
     expect(harness.port.customUnsubscribeCount).toBe(1);
     const staleDialog = activeSelect("stale", ["A"]);
     await Promise.resolve();
     harness.resolveDialog(undefined);
     await staleDialog;
-    await harness.port.emitControlEvent({
-      event: { type: "needs_attention" },
-    });
     await harness.port.emitUserInputWait({ state: "start", id: "late" });
     expect(harness.markerTransitions()).toEqual([
       markerTransition("create"),
@@ -728,11 +703,11 @@ describe("registerAttentionHooks", () => {
 
     await expect(port.fireSessionShutdown()).resolves.toBeUndefined();
     await expect(port.fireSessionShutdown()).resolves.toBeUndefined();
-    expect(port.customUnsubscribeCount).toBe(1);
+    expect(port.customUnsubscribeCount).toBe(0);
     expect(events).toEqual(["disposed"]);
   });
 
-  it("interrupts and joins retained listener work before disposing when unsubscribe throws", async () => {
+  it("interrupts and joins retained completion work before disposing when unsubscribe throws", async () => {
     const events: Array<string> = [];
     let spawnCount = 0;
     let resolvePlaybackActive: () => void = () => undefined;
@@ -789,19 +764,15 @@ describe("registerAttentionHooks", () => {
     const port = new TestRegistrationPort();
     await registerAttentionHooks(port, runner);
     await port.fireSessionStart({ mode: "tui", ui: makeIdleUi() });
-    const staleHandler = port.latestControlHandler();
-    if (staleHandler === undefined) {
-      throw new Error("session start did not retain a control handler");
-    }
+    await port.fireAgentEnd(agentEnd(assistant("stop")));
 
-    const playback = staleHandler({ event: { type: "needs_attention" } });
+    const playback = port.fireAgentSettled();
     await playbackActive;
     port.failNextUnsubscribe();
     const shutdown = port.fireSessionShutdown();
     await Promise.all([playback, shutdown]);
 
-    expect(port.unsubscribeCount).toBe(0);
-    expect(port.customUnsubscribeCount).toBe(1);
+    expect(port.customUnsubscribeCount).toBe(0);
     expect(events).toEqual([
       "playback-active",
       "playback-interrupted",
@@ -809,10 +780,9 @@ describe("registerAttentionHooks", () => {
     ]);
     expect(spawnCount).toBe(1);
 
-    await staleHandler({ event: { type: "needs_attention" } });
+    await port.fireAgentSettled();
     await port.fireSessionShutdown();
     expect(spawnCount).toBe(1);
-    expect(port.unsubscribeCount).toBe(0);
     expect(events.filter((event) => event === "disposed")).toHaveLength(1);
   });
 });

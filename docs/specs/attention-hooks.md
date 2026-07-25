@@ -2,25 +2,23 @@
 
 ## Purpose
 
-The attention-hooks extension plays an audio cue for settled runs and reported subagent attention. In an eligible tmux session, it also marks the exact pane that is waiting after a settled run, during a standard or opted-in custom dialog, or after reported subagent attention.
+The attention-hooks extension plays an audio cue for settled runs. In an eligible tmux session, it also marks the exact pane that is waiting after a settled run or during a standard or opted-in custom dialog.
 
 ## Attention State
 
-Interactive root TUI sessions maintain independent settled-run, standard-dialog, subagent-attention, and opt-in custom-dialog reasons. The tmux pane marker is present while any reason remains active.
+Interactive root TUI sessions maintain independent settled-run, standard-dialog, and opt-in custom-dialog reasons. The tmux pane marker is present while any reason remains active.
 
-A submitted input or new agent run clears settled-run and subagent-attention reasons. Starting a standard or custom dialog also consumes those passive reasons before adding its wait. Standard waits end when their dialog promise settles; custom waits end only through their matching event.
+A submitted input or new agent run clears settled-run attention. Starting a standard or custom dialog also consumes that passive reason before adding its wait. Standard waits end when their dialog promise settles; custom waits end only through their matching event.
 
-## Completion and Subagent Triggers
+## Completion Trigger
 
-A low-level agent outcome is recorded at `agent_end` but never notifies by itself. `agent_settled` consumes the latest recorded outcome, plays once, and sets settled-run attention when its final assistant message is not aborted. A settled run without a recorded assistant outcome is silent and unmarked. A new agent run clears stale outcome and passive attention reasons, and later retries replace earlier outcomes.
-
-A validated `subagent:control-event` whose nested event type is `needs_attention` independently plays audio and sets subagent attention. Null, malformed, and unrelated control payloads are ignored.
+A low-level agent outcome is recorded at `agent_end` but never notifies by itself. `agent_settled` consumes the latest recorded outcome, plays once, and sets settled-run attention when its final assistant message is not aborted. A settled run without a recorded assistant outcome is silent and unmarked. A new agent run clears stale outcome and passive attention, and later retries replace earlier outcomes.
 
 User-initiated aborted outcomes remain silent and unmarked.
 
 ## Child Suppression
 
-Child-status suppression applies to completion audio, control-event audio, tmux marking, and standard-dialog observation only when `PI_SUBAGENT_CHILD` is exactly `1`. Other values do not identify a child; the separate TUI and pane eligibility rules still apply to tmux behavior.
+Child-status suppression applies to completion audio, tmux marking, and standard-dialog observation only when `PI_SUBAGENT_CHILD` is exactly `1`. Other values do not identify a child; the separate TUI and pane eligibility rules still apply to tmux behavior.
 
 ## Dialog Observation
 
@@ -52,7 +50,7 @@ Initial and shutdown marker removal are best-effort. If Pi exits without session
 
 ## Lifecycle Disposal
 
-The control-event and custom-wait subscriptions begin at `session_start`. Standard-dialog observation begins there only for an interactive root TUI session. A repeated session start replaces the previously owned listeners, wrappers, work, reasons, and marker state. The factory starts no background resource.
+The custom-wait subscription begins at `session_start`. Standard-dialog observation begins there only for an interactive root TUI session. A repeated session start replaces the previously owned listener, wrappers, work, reasons, and marker state. The factory starts no background resource.
 
 Session start clears logical state and attempts to remove the marker before observers become active. Session shutdown disables callbacks, releases listeners and wrappers, interrupts and joins owned work, clears all reasons, attempts to remove the marker, and then disposes the managed runtime. Cleanup is idempotent, and stale callbacks cannot start audio or marker work after shutdown.
 

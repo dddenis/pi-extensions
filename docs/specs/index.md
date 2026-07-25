@@ -12,7 +12,7 @@ This directory contains checked-in contracts for the `pi-extensions` repository.
 - [Process Service](./process-service.md) — typed child-process boundary, output streams, terminal ownership, and bounded cleanup.
 - [Custom Footer](./custom-footer.md) — TUI footer content, OpenAI limit refresh, stale/backoff behavior, and scoped process lifecycle.
 - [Test Services](./test-services.md) — reusable Effect test-service contracts.
-- [Attention Hooks](./attention-hooks.md) — settled-run, dialog, and subagent attention signals; audio notifications; tmux pane markers; suppression; and lifecycle cleanup.
+- [Attention Hooks](./attention-hooks.md) — settled-run and dialog attention signals; audio notifications; tmux pane markers; suppression; and lifecycle cleanup.
 - [History Picker](./history-picker.md) — Ctrl+R interaction, saved-session indexing/cache semantics, fuzzy search, scrolling, and lifecycle cleanup.
 
 ## Change Rules

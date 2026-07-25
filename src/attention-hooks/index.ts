@@ -19,11 +19,7 @@ import { EnvironmentService } from "../services/environment";
 import { FileSystemService } from "../services/file-system";
 import { HomeDirectoryService } from "../services/home-directory";
 import { ProcessService } from "../services/process";
-import {
-  completionShouldNotify,
-  isNeedsAttention,
-  playAttentionSound,
-} from "./notification";
+import { completionShouldNotify, playAttentionSound } from "./notification";
 import { makeTmuxMarker, type TmuxMarker } from "./tmux-marker";
 import {
   installUiWaitObserver,
@@ -42,8 +38,8 @@ type AttentionHooksDependencies =
 
 type AsyncHandler = () => Promise<void>;
 type AgentEndHandler = (event: AgentEndEvent) => Promise<void>;
-type ControlEventHandler = (payload: unknown) => Promise<void>;
-type EventSubscription = (handler: ControlEventHandler) => () => void;
+type PayloadEventHandler = (payload: unknown) => Promise<void>;
+type EventSubscription = (handler: PayloadEventHandler) => () => void;
 
 export interface AttentionHooksSession {
   readonly mode: ExtensionMode;
@@ -59,8 +55,7 @@ export interface AttentionHooksRegistrationPort {
   readonly onAgentEnd: (handler: AgentEndHandler) => void;
   readonly onAgentSettled: (handler: AsyncHandler) => void;
   readonly onSessionShutdown: (handler: AsyncHandler) => void;
-  readonly subscribeControlEvent: (handler: ControlEventHandler) => () => void;
-  readonly subscribeUserInputWait: (handler: ControlEventHandler) => () => void;
+  readonly subscribeUserInputWait: (handler: PayloadEventHandler) => () => void;
 }
 
 export interface AttentionHooksRunner {
@@ -76,21 +71,18 @@ interface GenerationToken {
 
 interface AttentionReasons {
   readonly settledRun: boolean;
-  readonly subagent: boolean;
   readonly standardWaits: ReadonlySet<StandardWaitToken>;
   readonly customWaits: ReadonlySet<string>;
 }
 
 const emptyReasons = (): AttentionReasons => ({
   settledRun: false,
-  subagent: false,
   standardWaits: new Set(),
   customWaits: new Set(),
 });
 
 const needsAttention = (reasons: AttentionReasons): boolean =>
   reasons.settledRun ||
-  reasons.subagent ||
   reasons.standardWaits.size > 0 ||
   reasons.customWaits.size > 0;
 
@@ -225,7 +217,6 @@ export const registerAttentionHooks = async (
     updateReasons(generation, (current) => ({
       ...current,
       settledRun: false,
-      subagent: false,
     }));
 
   const beginStandardWait = (
@@ -235,7 +226,6 @@ export const registerAttentionHooks = async (
     updateReasons(generation, (current) => ({
       ...current,
       settledRun: false,
-      subagent: false,
       standardWaits: new Set([...current.standardWaits, token]),
     }));
 
@@ -255,7 +245,6 @@ export const registerAttentionHooks = async (
       return {
         ...current,
         settledRun: false,
-        subagent: false,
         customWaits: new Set([...current.customWaits, id]),
       };
     });
@@ -270,7 +259,7 @@ export const registerAttentionHooks = async (
   const installSubscription = (
     scope: Scope.CloseableScope,
     subscribe: EventSubscription,
-    handler: ControlEventHandler,
+    handler: PayloadEventHandler,
   ): Effect.Effect<void, AttentionHooksSubscriptionError> =>
     Scope.extend(
       Effect.acquireRelease(
@@ -285,32 +274,6 @@ export const registerAttentionHooks = async (
           }).pipe(Effect.ignore),
       ).pipe(Effect.asVoid),
       scope,
-    );
-
-  const signalSubagentAttention = (generation: AttentionHooksGeneration) =>
-    Effect.all(
-      [
-        updateReasons(generation, (current) => ({
-          ...current,
-          subagent: true,
-        })),
-        playAttentionSound,
-      ],
-      { concurrency: "unbounded" },
-    ).pipe(Effect.asVoid);
-
-  const installControlSubscription = (
-    generation: AttentionHooksGeneration,
-  ): Effect.Effect<void, AttentionHooksSubscriptionError> =>
-    installSubscription(
-      generation.listenerScope,
-      (handler) => port.subscribeControlEvent(handler),
-      (payload) => {
-        if (closed || !generation.token.active) return Promise.resolve();
-        return isNeedsAttention(payload)
-          ? launch(signalSubagentAttention, generation.id)
-          : Promise.resolve();
-      },
     );
 
   const installCustomWaitSubscription = (
@@ -398,7 +361,6 @@ export const registerAttentionHooks = async (
         nextGenerationId += 1;
         yield* Ref.set(currentGeneration, Option.some(next));
         yield* next.marker.setWaiting(false);
-        yield* installControlSubscription(next);
         yield* installCustomWaitSubscription(next);
         yield* installStandardUiObserver(next, session.ui);
         next.token.active = true;
@@ -493,8 +455,6 @@ export default async function attentionHooksExtension(pi: ExtensionAPI) {
       onAgentSettled: (handler) => pi.on("agent_settled", () => handler()),
       onSessionShutdown: (handler) =>
         pi.on("session_shutdown", () => handler()),
-      subscribeControlEvent: (handler) =>
-        pi.events.on("subagent:control-event", handler),
       subscribeUserInputWait: (handler) =>
         pi.events.on("attention-hooks:user-input-wait", handler),
     },

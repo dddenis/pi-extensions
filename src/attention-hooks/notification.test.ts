@@ -18,7 +18,6 @@ import {
 import {
   ATTENTION_SOUND_FILE,
   completionShouldNotify,
-  isNeedsAttention,
   playAttentionSound,
 } from "./notification";
 
@@ -74,12 +73,6 @@ describe("attention notification decisions", () => {
       completionShouldNotify([assistant("stop"), assistant("aborted")]),
     ).toBe(false);
     expect(completionShouldNotify([])).toBe(false);
-  });
-
-  it("validates needs-attention bus payloads", () => {
-    expect(isNeedsAttention({ event: { type: "needs_attention" } })).toBe(true);
-    expect(isNeedsAttention({ event: { type: "other" } })).toBe(false);
-    expect(isNeedsAttention(null)).toBe(false);
   });
 });
 
